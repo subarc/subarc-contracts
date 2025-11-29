@@ -64,7 +64,7 @@ We use **Hardhat** for testing. The suite includes integration tests covering th
 
 ```bash
 npx hardhat test
-Expected Output:Plaintext  SubArc Ecosystem (Factory + Logic Integration)
+Expected Output:  SubArc Ecosystem (Factory + Logic Integration)
     ✔ Should create a new service clone correctly
     ✔ Should charge 5% fee by default
     ✔ Merchant upgrades to Pro -> Fee drops to 1%
