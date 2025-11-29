@@ -91,6 +91,6 @@ Rescue: Accidental token transfers can be recovered by the owner.
 Note: This code has not yet been audited by a third-party firm. Use at your own risk.
 
 📄 License
-Distributed under the MIT License. See LICENSE for more information.
+Distributed under the Business Source License 1.1. See LICENSE for more information.
 
 built with 💙 by the SubArc Team.
