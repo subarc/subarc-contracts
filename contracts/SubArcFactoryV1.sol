@@ -106,6 +106,9 @@ contract SubArcFactoryV1 is Ownable, Pausable {
     // serviceAddress => license
     mapping(address => License) public serviceLicenses;
 
+    // Owner cüzdanına göre servis listesi
+    mapping(address => address[]) public servicesByOwner;
+
     // Custom deals (VIP anlaşma) → tier fee'yi override eder
     mapping(address => uint256) public customFees;   // service => feeBps
     mapping(address => bool) public hasCustomFee;    // service => aktif mi?
@@ -197,6 +200,7 @@ contract SubArcFactoryV1 is Ownable, Pausable {
         );
 
         isService[clone] = true;
+        servicesByOwner[msg.sender].push(clone);
 
         emit ServiceCreated(clone, msg.sender);
         return clone;
@@ -399,5 +403,12 @@ contract SubArcFactoryV1 is Ownable, Pausable {
 
     function platformWalletAddress() external view returns (address) {
         return platformWallet;
+    }
+
+    /**
+     * @notice Belirli bir cüzdanın oluşturduğu tüm servislerin adreslerini döndürür.
+     */
+    function getServicesByOwner(address _owner) external view returns (address[] memory) {
+        return servicesByOwner[_owner];
     }
 }
