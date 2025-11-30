@@ -1,57 +1,96 @@
-# Sample Hardhat 3 Beta Project (`mocha` and `ethers`)
+# SubArc Protocol 🔄
 
-This project showcases a Hardhat 3 Beta project using `mocha` for tests and the `ethers` library for Ethereum interactions.
+**EVM-based, gas-efficient subscription infrastructure for the Web3 ecosystem.**
 
-To learn more about the Hardhat 3 Beta, please visit the [Getting Started guide](https://hardhat.org/docs/getting-started#getting-started-with-hardhat-3). To share your feedback, join our [Hardhat 3 Beta](https://hardhat.org/hardhat3-beta-telegram-group) Telegram group or [open an issue](https://github.com/NomicFoundation/hardhat/issues/new) in our GitHub issue tracker.
+SubArc is a decentralized "Software as a Service" (SaaS) protocol that allows any dApp, game, or service provider to easily set up recurring crypto payments. It utilizes the **EIP-1167 Minimal Proxy (Clones)** pattern to ensure ultra-low gas costs for deploying subscription services.
 
-## Project Overview
+---
 
-This example project includes:
+## 🏗 Architecture
 
-- A simple Hardhat configuration file.
-- Foundry-compatible Solidity unit tests.
-- TypeScript integration tests using `mocha` and ethers.js
-- Examples demonstrating how to connect to different types of networks, including locally simulating OP mainnet.
+The protocol consists of two main components:
 
-## Usage
+1.  **SubArcFactoryV1:** The main registry and management contract. It handles:
+    * Deploying new Service clones.
+    * Managing the Tier system (Free / Pro / Enterprise).
+    * Collecting platform fees.
+    * Global security (Pause/Unpause).
 
-### Running Tests
+2.  **SubArcLogicV1:** The implementation contract. It handles:
+    * User subscriptions (`subscribe`).
+    * Validity checks (`isSubscribed`).
+    * Dynamic fee resolution (queries the Factory).
+    * Merchant withdrawals (`withdrawFunds`).
 
-To run all the tests in the project, execute the following command:
+## ✨ Key Features
 
-```shell
+* **🏭 Factory & Clone Pattern:** Merchants can deploy their own subscription contract for ~$0.50 (on L2s).
+* **💸 Dynamic Fee System:**
+    * **Free Tier:** 5% platform fee.
+    * **Pro Tier:** 1% platform fee (requires monthly payment).
+    * **Enterprise:** 0.1% platform fee (for high-volume merchants).
+* **🛡️ Security First:**
+    * `ReentrancyGuard` on all payment functions.
+    * `Pausable` (Circuit Breaker) for emergencies.
+    * `Ownable` access control.
+    * Safety caps on fee percentages (Max 50%).
+* **🔌 Plug & Play:** Supports any ERC-20 token (USDC, USDT, etc.) as payment currency.
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+* Node.js (v18+)
+* npm or yarn
+
+### Installation
+
+1.  Clone the repository:
+    ```bash
+    git clone [https://github.com/subarc/subarc-contracts.git](https://github.com/subarc/subarc-contracts.git)
+    cd subarc-contracts
+    ```
+
+2.  Install dependencies:
+    ```bash
+    npm install
+    ```
+
+### 🧪 Running Tests
+
+We use **Hardhat** for testing. The suite includes integration tests covering the full lifecycle (Factory creation -> Subscription -> Fee distribution -> Upgrades).
+
+```bash
 npx hardhat test
-```
+Expected Output:Plaintext  SubArc Ecosystem (Factory + Logic Integration)
+    ✔ Should create a new service clone correctly
+    ✔ Should charge 5% fee by default
+    ✔ Merchant upgrades to Pro -> Fee drops to 1%
+    ✔ Should revert to 5% fee after 30 days (Pro Expired)
+    ✔ Only owner can withdraw funds
+    ...
+  8 passing
 
-You can also selectively run the Solidity or `mocha` tests:
+📜 Contract Details
+Contract	            Type	Description
+SubArcFactoryV1	        Core	Manages tiers, creates clones, collects fees.
+SubArcLogicV1	        Logic	The blueprint for all subscription services.
+MockUSDC	            Test	Used for local testing environment (6 decimals).
 
-```shell
-npx hardhat test solidity
-npx hardhat test mocha
-```
+🔒 Security & Audit
+This project follows industry best practices (Checks-Effects-Interactions, OpenZeppelin standards).
 
-### Make a deployment to Sepolia
+Access Control: Strict onlyOwner usage.
 
-This project includes an example Ignition module to deploy the contract. You can deploy this module to a locally simulated chain or to Sepolia.
+Initializers: Implementation contract is locked (_disableInitializers).
 
-To run the deployment to a local chain:
+Rescue: Accidental token transfers can be recovered by the owner.
 
-```shell
-npx hardhat ignition deploy ignition/modules/Counter.ts
-```
+Note: This code has not yet been audited by a third-party firm. Use at your own risk.
 
-To run the deployment to Sepolia, you need an account with funds to send the transaction. The provided Hardhat configuration includes a Configuration Variable called `SEPOLIA_PRIVATE_KEY`, which you can use to set the private key of the account you want to use.
+📄 License
+Distributed under the MIT License. See LICENSE for more information.
 
-You can set the `SEPOLIA_PRIVATE_KEY` variable using the `hardhat-keystore` plugin or by setting it as an environment variable.
-
-To set the `SEPOLIA_PRIVATE_KEY` config variable using `hardhat-keystore`:
-
-```shell
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
-```
-
-After setting the variable, you can run the deployment with the Sepolia network:
-
-```shell
-npx hardhat ignition deploy --network sepolia ignition/modules/Counter.ts
-```
+built with 💙 by the SubArc Team.
