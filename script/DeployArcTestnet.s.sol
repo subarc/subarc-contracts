@@ -8,8 +8,12 @@ interface Vm {
     function envAddress(string calldata key) external view returns (address);
     function startBroadcast(uint256 privateKey) external;
     function stopBroadcast() external;
-    function serializeAddress(string calldata objectKey, string calldata valueKey, address value) external returns (string memory);
-    function serializeUint(string calldata objectKey, string calldata valueKey, uint256 value) external returns (string memory);
+    function serializeAddress(string calldata objectKey, string calldata valueKey, address value)
+        external
+        returns (string memory);
+    function serializeUint(string calldata objectKey, string calldata valueKey, uint256 value)
+        external
+        returns (string memory);
     function writeJson(string calldata json, string calldata path) external;
 }
 
@@ -31,7 +35,9 @@ contract DeployArcTestnet {
         string memory json = vm.serializeUint(deployment, "chainId", block.chainid);
         json = vm.serializeUint(deployment, "deploymentBlock", deploymentBlock);
         json = vm.serializeAddress(deployment, "factory", address(factory));
-        json = vm.serializeAddress(deployment, "subscriptionImplementation", factory.subscriptionImplementation());
+        json = vm.serializeAddress(
+            deployment, "subscriptionImplementation", factory.subscriptionImplementation()
+        );
         json = vm.serializeAddress(deployment, "paymentToken", paymentToken);
         json = vm.serializeAddress(deployment, "feeRecipient", feeRecipient);
         vm.writeJson(json, "deployments/arc-testnet.json");

@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "echo 'No JS build required for @subarc/contracts; use npm run forge:build after installing Foundry'",
+    "build": "forge build",
+    "test": "forge test -vv",
+    "coverage": "forge coverage --summary",
     "abi:generate": "node scripts/generate-abis.mjs",
     "forge:build": "forge build",
     "forge:test": "forge test -vv",

@@ -5,6 +5,7 @@ import {IERC20Minimal} from "./IERC20Minimal.sol";
 
 library SafeERC20Minimal {
     error SafeTransferFailed();
+    error TokenNotContract(address token);
 
     function safeTransfer(address token, address to, uint256 amount) internal {
         _call(token, abi.encodeWithSelector(IERC20Minimal.transfer.selector, to, amount));
@@ -15,11 +16,18 @@ library SafeERC20Minimal {
     }
 
     function _call(address token, bytes memory data) private {
+        if (token.code.length == 0) revert TokenNotContract(token);
+
         (bool success, bytes memory returnData) = token.call(data);
         if (!success || (returnData.length != 0 && !abi.decode(returnData, (bool)))) {
             revert SafeTransferFailed();
         }
     }
+}
+
+interface ISubArcFactoryFees {
+    function getCurrentFeeBps(address service) external view returns (uint16);
+    function platformWalletAddress() external view returns (address);
 }
 
 contract SubArcSubscriptionV1 {
@@ -55,9 +63,13 @@ contract SubArcSubscriptionV1 {
 
     bool private _locked;
 
-    event Initialized(address indexed factory, address indexed merchant, address indexed paymentToken);
+    event Initialized(
+        address indexed factory, address indexed merchant, address indexed paymentToken
+    );
     event PlanCreated(bytes32 indexed planId, uint256 price, uint64 interval, string metadataURI);
-    event PlanUpdated(bytes32 indexed planId, uint256 price, uint64 interval, bool active, string metadataURI);
+    event PlanUpdated(
+        bytes32 indexed planId, uint256 price, uint64 interval, bool active, string metadataURI
+    );
     event Subscribed(
         address indexed user,
         bytes32 indexed planId,
@@ -75,7 +87,9 @@ contract SubArcSubscriptionV1 {
         uint256 netAmount
     );
     event Cancelled(address indexed user, bytes32 indexed planId, uint64 expiresAt);
-    event MerchantWithdrawn(address indexed merchant, address indexed to, address indexed paymentToken, uint256 amount);
+    event MerchantWithdrawn(
+        address indexed merchant, address indexed to, address indexed paymentToken, uint256 amount
+    );
     event Paused(address indexed account);
     event Unpaused(address indexed account);
     event Recovered(address indexed token, address indexed to, uint256 amount);
@@ -103,6 +117,8 @@ contract SubArcSubscriptionV1 {
     error InsufficientBalance();
     error InvalidToken();
     error PaymentTokenRescueBlocked();
+    error ContractExpected(address account);
+    error ExpiryOverflow();
 
     constructor() {
         initialized = true;
@@ -146,6 +162,8 @@ contract SubArcSubscriptionV1 {
         if (paymentToken_ == address(0)) revert TokenZero();
         if (feeRecipient_ == address(0)) revert FeeRecipientZero();
         if (feeBps_ > MAX_FEE_BPS) revert FeeTooHigh();
+        if (factory_.code.length == 0) revert ContractExpected(factory_);
+        if (paymentToken_.code.length == 0) revert ContractExpected(paymentToken_);
 
         initialized = true;
         factory = factory_;
@@ -199,7 +217,9 @@ contract SubArcSubscriptionV1 {
         Subscription storage sub = _subscriptions[msg.sender][planId];
         if (isSubscribed(msg.sender, planId)) revert AlreadySubscribed();
 
-        uint64 expiresAt = uint64(block.timestamp) + plan.interval;
+        uint64 start = _toUint64(block.timestamp);
+        if (plan.interval > type(uint64).max - start) revert ExpiryOverflow();
+        uint64 expiresAt = start + plan.interval;
         sub.expiresAt = expiresAt;
         sub.cancelled = false;
 
@@ -217,7 +237,9 @@ contract SubArcSubscriptionV1 {
         if (sub.expiresAt == 0) revert NotSubscribed();
         if (sub.cancelled) revert SubscriptionCancelled();
 
-        uint64 start = sub.expiresAt > block.timestamp ? sub.expiresAt : uint64(block.timestamp);
+        uint64 currentTime = _toUint64(block.timestamp);
+        uint64 start = sub.expiresAt > currentTime ? sub.expiresAt : currentTime;
+        if (plan.interval > type(uint64).max - start) revert ExpiryOverflow();
         uint64 expiresAt = start + plan.interval;
         sub.expiresAt = expiresAt;
 
@@ -232,6 +254,7 @@ contract SubArcSubscriptionV1 {
     function cancel(bytes32 planId) public onlyInitialized {
         Subscription storage sub = _subscriptions[msg.sender][planId];
         if (sub.expiresAt == 0) revert NotSubscribed();
+        if (sub.cancelled) revert SubscriptionCancelled();
         sub.cancelled = true;
         emit Cancelled(msg.sender, planId, sub.expiresAt);
     }
@@ -242,17 +265,20 @@ contract SubArcSubscriptionV1 {
 
     function isSubscribed(address user, bytes32 planId) public view returns (bool) {
         Subscription memory sub = _subscriptions[user][planId];
-        return sub.expiresAt >= block.timestamp && !sub.cancelled;
+        // forge-lint: disable-next-line(block-timestamp)
+        return sub.expiresAt > block.timestamp && !sub.cancelled;
     }
 
     function subscriptions(address user) external view returns (uint64 expiresAt, bool cancelled) {
-        return this.subscriptions(user, DEFAULT_PLAN_ID);
+        Subscription memory sub = _subscriptions[user][DEFAULT_PLAN_ID];
+        return (sub.expiresAt, sub.cancelled);
     }
 
-    function subscriptions(
-        address user,
-        bytes32 planId
-    ) external view returns (uint64 expiresAt, bool cancelled) {
+    function subscriptions(address user, bytes32 planId)
+        external
+        view
+        returns (uint64 expiresAt, bool cancelled)
+    {
         Subscription memory sub = _subscriptions[user][planId];
         return (sub.expiresAt, sub.cancelled);
     }
@@ -265,10 +291,17 @@ contract SubArcSubscriptionV1 {
         return plans[DEFAULT_PLAN_ID].interval;
     }
 
-    function withdrawFunds(address to, uint256 amount) external onlyInitialized onlyMerchant nonReentrant {
+    function withdrawFunds(address to, uint256 amount)
+        external
+        onlyInitialized
+        onlyMerchant
+        nonReentrant
+    {
         if (to == address(0)) revert ToZero();
         if (amount == 0) revert AmountZero();
-        if (IERC20Minimal(paymentToken).balanceOf(address(this)) < amount) revert InsufficientBalance();
+        if (IERC20Minimal(paymentToken).balanceOf(address(this)) < amount) {
+            revert InsufficientBalance();
+        }
 
         paymentToken.safeTransfer(to, amount);
         emit MerchantWithdrawn(msg.sender, to, paymentToken, amount);
@@ -284,8 +317,14 @@ contract SubArcSubscriptionV1 {
         emit Unpaused(msg.sender);
     }
 
-    function recoverERC20(address token, address to, uint256 amount) external onlyInitialized onlyMerchant nonReentrant {
+    function recoverERC20(address token, address to, uint256 amount)
+        external
+        onlyInitialized
+        onlyMerchant
+        nonReentrant
+    {
         if (token == paymentToken) revert PaymentTokenRescueBlocked();
+        if (token == address(0)) revert TokenZero();
         if (to == address(0)) revert ToZero();
         if (amount == 0) revert AmountZero();
 
@@ -295,6 +334,17 @@ contract SubArcSubscriptionV1 {
 
     function getPlanIds() external view returns (bytes32[] memory) {
         return _planIds;
+    }
+
+    function currentFeeConfig()
+        public
+        view
+        returns (address currentFeeRecipient, uint16 currentFeeBps)
+    {
+        currentFeeRecipient = ISubArcFactoryFees(factory).platformWalletAddress();
+        currentFeeBps = ISubArcFactoryFees(factory).getCurrentFeeBps(address(this));
+        if (currentFeeRecipient == address(0)) revert FeeRecipientZero();
+        if (currentFeeBps > MAX_FEE_BPS) revert FeeTooHigh();
     }
 
     function _createPlan(
@@ -308,12 +358,8 @@ contract SubArcSubscriptionV1 {
         if (price == 0) revert PriceZero();
         if (intervalSeconds == 0) revert IntervalZero();
 
-        plans[planId] = Plan({
-            price: price,
-            interval: intervalSeconds,
-            active: true,
-            metadataURI: metadataURI
-        });
+        plans[planId] =
+            Plan({price: price, interval: intervalSeconds, active: true, metadataURI: metadataURI});
         _planIds.push(planId);
 
         emit PlanCreated(planId, price, intervalSeconds, metadataURI);
@@ -326,13 +372,23 @@ contract SubArcSubscriptionV1 {
     }
 
     function _collectPayment(uint256 amount) internal returns (uint256 feePaid, uint256 netAmount) {
-        feePaid = (amount * feeBps) / 10_000;
+        (address currentFeeRecipient, uint16 currentFeeBps) = currentFeeConfig();
+        feeRecipient = currentFeeRecipient;
+        feeBps = currentFeeBps;
+
+        feePaid = (amount * currentFeeBps) / 10_000;
         netAmount = amount - feePaid;
 
         if (feePaid > 0) {
-            paymentToken.safeTransferFrom(msg.sender, feeRecipient, feePaid);
+            paymentToken.safeTransferFrom(msg.sender, currentFeeRecipient, feePaid);
         }
         paymentToken.safeTransferFrom(msg.sender, address(this), netAmount);
+    }
+
+    function _toUint64(uint256 value) internal pure returns (uint64) {
+        if (value > type(uint64).max) revert ExpiryOverflow();
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint64(value);
     }
 }
 

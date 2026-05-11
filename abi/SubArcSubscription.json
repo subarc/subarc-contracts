@@ -15,6 +15,22 @@
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      }
+    ],
+    "name": "ContractExpected",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ExpiryOverflow",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "FactoryZero",
     "type": "error"
@@ -112,6 +128,17 @@
   {
     "inputs": [],
     "name": "ToZero",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      }
+    ],
+    "name": "TokenNotContract",
     "type": "error"
   },
   {
@@ -490,6 +517,24 @@
     "name": "createPlan",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "currentFeeConfig",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "currentFeeRecipient",
+        "type": "address"
+      },
+      {
+        "internalType": "uint16",
+        "name": "currentFeeBps",
+        "type": "uint16"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {
