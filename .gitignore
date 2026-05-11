@@ -1,28 +1,3 @@
-# Dependency directories
-node_modules/
-installed_contracts/
-
-# Hardhat files
 cache/
-artifacts/
-ignition/deployments/chain-31337
-
-# Environment variables (ÇOK ÖNEMLİ - GİZLİLİK)
-.env
-.env.local
-
-# Coverage reports
-coverage/
-coverage.json
-
-# Typechain
-typechain/
-typechain-types/
-
-# Misc
-.DS_Store
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-dist/
-bundle/
+out/
+broadcast/
