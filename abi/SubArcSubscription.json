@@ -37,6 +37,11 @@
   },
   {
     "inputs": [],
+    "name": "FeeChanged",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "FeeRecipientZero",
     "type": "error"
   },
@@ -48,6 +53,11 @@
   {
     "inputs": [],
     "name": "InsufficientBalance",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "IntervalChanged",
     "type": "error"
   },
   {
@@ -107,6 +117,11 @@
   },
   {
     "inputs": [],
+    "name": "PriceChanged",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "PriceZero",
     "type": "error"
   },
@@ -144,6 +159,32 @@
   {
     "inputs": [],
     "name": "TokenZero",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "to",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "expected",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "received",
+        "type": "uint256"
+      }
+    ],
+    "name": "TransferAmountMismatch",
     "type": "error"
   },
   {
@@ -810,7 +851,23 @@
     "type": "function"
   },
   {
-    "inputs": [],
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "expectedPrice",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "expectedInterval",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint16",
+        "name": "maxFeeBps",
+        "type": "uint16"
+      }
+    ],
     "name": "renew",
     "outputs": [],
     "stateMutability": "nonpayable",
@@ -822,6 +879,21 @@
         "internalType": "bytes32",
         "name": "planId",
         "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "expectedPrice",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "expectedInterval",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint16",
+        "name": "maxFeeBps",
+        "type": "uint16"
       }
     ],
     "name": "renew",
@@ -868,6 +940,21 @@
         "internalType": "bytes32",
         "name": "planId",
         "type": "bytes32"
+      },
+      {
+        "internalType": "uint256",
+        "name": "expectedPrice",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "expectedInterval",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint16",
+        "name": "maxFeeBps",
+        "type": "uint16"
       }
     ],
     "name": "subscribe",
@@ -876,7 +963,23 @@
     "type": "function"
   },
   {
-    "inputs": [],
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "expectedPrice",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint64",
+        "name": "expectedInterval",
+        "type": "uint64"
+      },
+      {
+        "internalType": "uint16",
+        "name": "maxFeeBps",
+        "type": "uint16"
+      }
+    ],
     "name": "subscribe",
     "outputs": [],
     "stateMutability": "nonpayable",

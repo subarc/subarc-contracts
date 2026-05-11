@@ -63,13 +63,14 @@ contract SubArcFactoryV1 {
     struct ServiceLicense {
         uint256 tierId;
         uint64 expiresAt;
+        uint16 feeBpsSnapshot;
     }
 
     uint256 public constant TIER_FREE = 0;
     uint256 public constant TIER_PRO = 1;
     uint256 public constant TIER_ENTERPRISE = 2;
     uint16 public constant MAX_FEE_BPS = 1_000;
-    string public constant VERSION = "1.0.0";
+    string public constant VERSION = "1.1.0";
 
     address public owner;
     address public feeRecipient;
@@ -83,6 +84,7 @@ contract SubArcFactoryV1 {
     mapping(address => address) public serviceOwner;
     mapping(address => address) public servicePaymentToken;
     mapping(address => ServiceLicense) public serviceLicenses;
+    mapping(address => bool) public allowedPaymentTokens;
     mapping(uint256 => TierInfo) public tiers;
     address[] public allServices;
     bool private _locked;
@@ -118,6 +120,7 @@ contract SubArcFactoryV1 {
     event Paused(address indexed account);
     event Unpaused(address indexed account);
     event TokensRecovered(address indexed token, address indexed to, uint256 amount);
+    event PaymentTokenAllowed(address indexed token, bool allowed);
 
     error NotOwner();
     error PausedError();
@@ -135,8 +138,10 @@ contract SubArcFactoryV1 {
     error ToZero();
     error AmountZero();
     error TokenNotContract();
+    error TokenNotAllowed();
     error ExpiryOverflow();
     error Reentrancy();
+    error TransferAmountMismatch(address token, address to, uint256 expected, uint256 received);
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -225,10 +230,9 @@ contract SubArcFactoryV1 {
     function getCurrentFeeBps(address service) external view returns (uint16) {
         if (!isService[service]) revert ServiceUnknown();
         ServiceLicense memory license = serviceLicenses[service];
-        TierInfo memory tier = tiers[license.tierId];
         // forge-lint: disable-next-line(block-timestamp)
-        if (license.tierId != TIER_FREE && tier.active && license.expiresAt > block.timestamp) {
-            return tier.feeBps;
+        if (license.tierId != TIER_FREE && license.expiresAt > block.timestamp) {
+            return license.feeBpsSnapshot;
         }
         return platformFeeBps;
     }
@@ -252,10 +256,11 @@ contract SubArcFactoryV1 {
         if (tier.duration > type(uint64).max - startsAt) revert ExpiryOverflow();
 
         uint64 expiresAt = startsAt + tier.duration;
-        serviceLicenses[service] = ServiceLicense({tierId: tierId, expiresAt: expiresAt});
+        serviceLicenses[service] =
+            ServiceLicense({tierId: tierId, expiresAt: expiresAt, feeBpsSnapshot: tier.feeBps});
 
         address paymentToken = servicePaymentToken[service];
-        paymentToken.safeTransferFrom(msg.sender, feeRecipient, tier.price);
+        _safeTransferFromExact(paymentToken, msg.sender, feeRecipient, tier.price);
 
         emit TierPurchased(msg.sender, service, tierId, tier.price, expiresAt);
     }
@@ -289,6 +294,13 @@ contract SubArcFactoryV1 {
         if (feeRecipient_ == address(0)) revert FeeRecipientZero();
         feeRecipient = feeRecipient_;
         emit FeeRecipientUpdated(feeRecipient_);
+    }
+
+    function setPaymentTokenAllowed(address token, bool allowed) external onlyOwner {
+        if (token == address(0)) revert TokenZero();
+        if (allowed && token.code.length == 0) revert TokenNotContract();
+        allowedPaymentTokens[token] = allowed;
+        emit PaymentTokenAllowed(token, allowed);
     }
 
     function transferOwnership(address newOwner) external onlyOwner {
@@ -327,6 +339,7 @@ contract SubArcFactoryV1 {
     ) internal returns (address service) {
         if (paymentToken == address(0)) revert TokenZero();
         if (paymentToken.code.length == 0) revert TokenNotContract();
+        if (!allowedPaymentTokens[paymentToken]) revert TokenNotAllowed();
         _ensureMerchant(msg.sender);
 
         service = subscriptionImplementation.clone();
@@ -346,10 +359,23 @@ contract SubArcFactoryV1 {
         isService[service] = true;
         serviceOwner[service] = msg.sender;
         servicePaymentToken[service] = paymentToken;
-        serviceLicenses[service] = ServiceLicense({tierId: TIER_FREE, expiresAt: 0});
+        serviceLicenses[service] =
+            ServiceLicense({tierId: TIER_FREE, expiresAt: 0, feeBpsSnapshot: platformFeeBps});
         allServices.push(service);
 
         emit SubscriptionContractCreated(msg.sender, service, paymentToken, metadataURI);
+    }
+
+    function _safeTransferFromExact(address token, address from, address to, uint256 amount)
+        internal
+    {
+        if (amount == 0) return;
+        uint256 beforeBalance = IERC20Minimal(token).balanceOf(to);
+        token.safeTransferFrom(from, to, amount);
+        uint256 received = IERC20Minimal(token).balanceOf(to) - beforeBalance;
+        if (received != amount) {
+            revert TransferAmountMismatch(token, to, amount, received);
+        }
     }
 
     function _ensureMerchant(address merchant) internal {

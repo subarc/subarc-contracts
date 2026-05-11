@@ -85,9 +85,21 @@ contract ReentrantUSDC is MockUSDC {
     function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
         if (attack) {
             attack = false;
-            target.renew(planId);
+            target.renew(planId, 10_000000, 30 days, 500);
         }
         return super.transferFrom(from, to, amount);
+    }
+}
+
+contract FeeOnTransferUSDC is MockUSDC {
+    function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
+        require(balanceOf[from] >= amount, "BALANCE_LOW");
+        require(allowance[from][msg.sender] >= amount, "ALLOWANCE_LOW");
+        require(amount > 0, "AMOUNT_ZERO");
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount - 1;
+        return true;
     }
 }
 
@@ -111,6 +123,7 @@ contract SubArcMVPTest is MiniTest {
     function setUp() public {
         usdc = new MockUSDC();
         factory = new SubArcFactory(feeRecipient, PLATFORM_FEE_BPS);
+        factory.setPaymentTokenAllowed(address(usdc), true);
         usdc.mint(subscriber, 1_000_000000);
         usdc.mint(merchant, 1_000_000000);
 
@@ -159,7 +172,7 @@ contract SubArcMVPTest is MiniTest {
         _approveSubscriber();
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
 
         assertTrue(subscription.isSubscribed(subscriber, BASIC_PLAN), "subscriber should be active");
     }
@@ -169,12 +182,12 @@ contract SubArcMVPTest is MiniTest {
         _approveSubscriber();
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
         (, uint256 firstExpiry) = _subscriptionState(subscriber, BASIC_PLAN);
 
         vm.warp(block.timestamp + 10 days);
         vm.prank(subscriber);
-        subscription.renew(BASIC_PLAN);
+        subscription.renew(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
         (, uint256 secondExpiry) = _subscriptionState(subscriber, BASIC_PLAN);
 
         assertEq(secondExpiry, firstExpiry + INTERVAL, "renew should extend from prior expiry");
@@ -185,12 +198,12 @@ contract SubArcMVPTest is MiniTest {
         _approveSubscriber();
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
         vm.warp(block.timestamp + INTERVAL + 1 days);
 
         uint256 renewalTime = block.timestamp;
         vm.prank(subscriber);
-        subscription.renew(BASIC_PLAN);
+        subscription.renew(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
         (, uint256 secondExpiry) = _subscriptionState(subscriber, BASIC_PLAN);
 
         assertEq(secondExpiry, renewalTime + INTERVAL, "expired renew should start from now");
@@ -201,7 +214,7 @@ contract SubArcMVPTest is MiniTest {
         _approveSubscriber();
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
         vm.prank(subscriber);
         subscription.cancel(BASIC_PLAN);
 
@@ -213,7 +226,7 @@ contract SubArcMVPTest is MiniTest {
         _approveSubscriber();
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
 
         uint256 contractBalance = usdc.balanceOf(address(subscription));
         uint256 merchantBalanceBefore = usdc.balanceOf(merchant);
@@ -233,7 +246,7 @@ contract SubArcMVPTest is MiniTest {
         _approveSubscriber();
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
 
         uint256 expectedFee = (PRICE * PLATFORM_FEE_BPS) / 10_000;
         uint256 expectedNet = PRICE - expectedFee;
@@ -248,7 +261,7 @@ contract SubArcMVPTest is MiniTest {
         factory.setPlatformFeeBps(250);
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
 
         uint256 expectedFee = (PRICE * 250) / 10_000;
         assertEq(usdc.balanceOf(feeRecipient), expectedFee, "updated fee not applied");
@@ -261,11 +274,56 @@ contract SubArcMVPTest is MiniTest {
         factory.setFeeRecipient(newFeeRecipient);
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
 
         uint256 expectedFee = (PRICE * PLATFORM_FEE_BPS) / 10_000;
         assertEq(usdc.balanceOf(feeRecipient), 0, "old fee recipient should not receive fee");
         assertEq(usdc.balanceOf(newFeeRecipient), expectedFee, "new fee recipient mismatch");
+    }
+
+    function testSubscribeRevertsWhenPriceChanges() public {
+        _createPlan();
+        _approveSubscriber();
+
+        vm.prank(merchant);
+        subscription.setPlan(BASIC_PLAN, PRICE * 2, INTERVAL, true, "ipfs://plan-v2");
+
+        vm.expectRevert(SubArcSubscriptionV1.PriceChanged.selector);
+        vm.prank(subscriber);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
+    }
+
+    function testSubscribeRevertsWhenIntervalChanges() public {
+        _createPlan();
+        _approveSubscriber();
+
+        vm.prank(merchant);
+        subscription.setPlan(BASIC_PLAN, PRICE, INTERVAL / 2, true, "ipfs://plan-v2");
+
+        vm.expectRevert(SubArcSubscriptionV1.IntervalChanged.selector);
+        vm.prank(subscriber);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
+    }
+
+    function testSubscribeRevertsWhenFeeExceedsMax() public {
+        _createPlan();
+        _approveSubscriber();
+
+        factory.setPlatformFeeBps(600);
+
+        vm.expectRevert(SubArcSubscriptionV1.FeeChanged.selector);
+        vm.prank(subscriber);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
+    }
+
+    function testFactoryPauseBlocksExistingServiceSubscribe() public {
+        _createPlan();
+        _approveSubscriber();
+        factory.pause();
+
+        vm.expectRevert(SubArcSubscriptionV1.PausedError.selector);
+        vm.prank(subscriber);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
     }
 
     function testPurchaseTierCollectsPaymentAndDiscountsServiceFee() public {
@@ -281,11 +339,38 @@ contract SubArcMVPTest is MiniTest {
         assertEq(factory.getCurrentFeeBps(address(subscription)), PRO_FEE_BPS, "pro fee not active");
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
 
         uint256 expectedSubscriptionFee = (PRICE * PRO_FEE_BPS) / 10_000;
         assertEq(
             usdc.balanceOf(feeRecipient), PRO_PRICE + expectedSubscriptionFee, "pro fee mismatch"
+        );
+    }
+
+    function testTierFeeSnapshotSurvivesTierUpdate() public {
+        _createPlan();
+        _approveSubscriber();
+
+        vm.prank(merchant);
+        usdc.approve(address(factory), PRO_PRICE);
+        vm.prank(merchant);
+        factory.purchaseTier(address(subscription), 1);
+
+        factory.setTier(1, PRO_PRICE, 300, 30 days, true);
+        assertEq(
+            factory.getCurrentFeeBps(address(subscription)),
+            PRO_FEE_BPS,
+            "active license should use fee snapshot"
+        );
+
+        vm.prank(subscriber);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PRO_FEE_BPS);
+
+        uint256 expectedSubscriptionFee = (PRICE * PRO_FEE_BPS) / 10_000;
+        assertEq(
+            usdc.balanceOf(feeRecipient),
+            PRO_PRICE + expectedSubscriptionFee,
+            "snapshot fee mismatch"
         );
     }
 
@@ -307,10 +392,53 @@ contract SubArcMVPTest is MiniTest {
         );
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
 
         uint256 expectedFee = (PRICE * PLATFORM_FEE_BPS) / 10_000;
         assertEq(usdc.balanceOf(feeRecipient), PRO_PRICE + expectedFee, "fallback fee mismatch");
+    }
+
+    function testTierExactExpiryFallsBackToPlatformFee() public {
+        vm.prank(merchant);
+        usdc.approve(address(factory), PRO_PRICE);
+        vm.prank(merchant);
+        factory.purchaseTier(address(subscription), 1);
+
+        (, uint64 expiresAt,) = factory.serviceLicenses(address(subscription));
+        vm.warp(expiresAt);
+
+        assertEq(
+            factory.getCurrentFeeBps(address(subscription)),
+            PLATFORM_FEE_BPS,
+            "exact tier expiry should fall back"
+        );
+    }
+
+    function testTokenWhitelistBlocksUnknownToken() public {
+        MockUSDC other = new MockUSDC();
+
+        vm.expectRevert(SubArcFactoryV1.TokenNotAllowed.selector);
+        vm.prank(merchant);
+        factory.createSubscriptionContract(address(other), "ipfs://unknown-token");
+    }
+
+    function testFeeOnTransferPaymentTokenRejected() public {
+        FeeOnTransferUSDC token = new FeeOnTransferUSDC();
+        token.mint(subscriber, 1_000_000000);
+        factory.setPaymentTokenAllowed(address(token), true);
+
+        vm.prank(merchant);
+        address service = factory.createSubscriptionContract(address(token), "ipfs://fee-token");
+        SubArcSubscription feeTokenSubscription = SubArcSubscription(service);
+
+        vm.prank(merchant);
+        feeTokenSubscription.createPlan(BASIC_PLAN, PRICE, INTERVAL, "ipfs://plan");
+        vm.prank(subscriber);
+        token.approve(address(feeTokenSubscription), type(uint256).max);
+
+        vm.expectRevert();
+        vm.prank(subscriber);
+        feeTokenSubscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
     }
 
     function testOnlyServiceOwnerCanPurchaseTier() public {
@@ -350,18 +478,18 @@ contract SubArcMVPTest is MiniTest {
 
         vm.expectRevert(SubArcSubscriptionV1.PausedError.selector);
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
 
         vm.prank(merchant);
         subscription.unpause();
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
 
         vm.prank(merchant);
         subscription.pause();
         vm.expectRevert(SubArcSubscriptionV1.PausedError.selector);
         vm.prank(subscriber);
-        subscription.renew(BASIC_PLAN);
+        subscription.renew(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
     }
 
     function testPaymentTokenCannotBeRescued() public {
@@ -433,7 +561,7 @@ contract SubArcMVPTest is MiniTest {
         _approveSubscriber();
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
         (, uint256 expiry) = _subscriptionState(subscriber, BASIC_PLAN);
 
         vm.warp(expiry);
@@ -447,7 +575,7 @@ contract SubArcMVPTest is MiniTest {
         _approveSubscriber();
 
         vm.prank(subscriber);
-        subscription.subscribe(BASIC_PLAN);
+        subscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
         vm.prank(subscriber);
         subscription.cancel(BASIC_PLAN);
 
@@ -473,6 +601,7 @@ contract SubArcMVPTest is MiniTest {
     function testReentrantTokenIsBlocked() public {
         ReentrantUSDC token = new ReentrantUSDC();
         token.mint(subscriber, 1_000_000000);
+        factory.setPaymentTokenAllowed(address(token), true);
 
         vm.prank(merchant);
         address service = factory.createSubscriptionContract(address(token), "ipfs://reentrant");
@@ -487,7 +616,7 @@ contract SubArcMVPTest is MiniTest {
 
         vm.expectRevert();
         vm.prank(subscriber);
-        reentrantSubscription.subscribe(BASIC_PLAN);
+        reentrantSubscription.subscribe(BASIC_PLAN, PRICE, INTERVAL, PLATFORM_FEE_BPS);
         assertFalse(
             reentrantSubscription.isSubscribed(subscriber, BASIC_PLAN),
             "reentrant subscribe should fail"

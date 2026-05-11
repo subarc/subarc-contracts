@@ -28,6 +28,7 @@ contract DeployArcTestnet {
 
         vm.startBroadcast(deployerKey);
         factory = new SubArcFactory(feeRecipient, feeBps);
+        factory.setPaymentTokenAllowed(paymentToken, true);
         uint256 deploymentBlock = block.number;
         vm.stopBroadcast();
 

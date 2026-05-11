@@ -28,6 +28,7 @@ library SafeERC20Minimal {
 interface ISubArcFactoryFees {
     function getCurrentFeeBps(address service) external view returns (uint16);
     function platformWalletAddress() external view returns (address);
+    function paused() external view returns (bool);
 }
 
 contract SubArcSubscriptionV1 {
@@ -119,6 +120,10 @@ contract SubArcSubscriptionV1 {
     error PaymentTokenRescueBlocked();
     error ContractExpected(address account);
     error ExpiryOverflow();
+    error PriceChanged();
+    error IntervalChanged();
+    error FeeChanged();
+    error TransferAmountMismatch(address token, address to, uint256 expected, uint256 received);
 
     constructor() {
         initialized = true;
@@ -143,6 +148,11 @@ contract SubArcSubscriptionV1 {
 
     modifier whenNotPaused() {
         if (paused) revert PausedError();
+        _;
+    }
+
+    modifier whenProtocolNotPaused() {
+        if (ISubArcFactoryFees(factory).paused()) revert PausedError();
         _;
     }
 
@@ -208,14 +218,21 @@ contract SubArcSubscriptionV1 {
         emit PlanUpdated(planId, price, intervalSeconds, active, metadataURI);
     }
 
-    function subscribe() external {
-        subscribe(DEFAULT_PLAN_ID);
+    function subscribe(uint256 expectedPrice, uint64 expectedInterval, uint16 maxFeeBps) external {
+        subscribe(DEFAULT_PLAN_ID, expectedPrice, expectedInterval, maxFeeBps);
     }
 
-    function subscribe(bytes32 planId) public onlyInitialized nonReentrant whenNotPaused {
+    function subscribe(
+        bytes32 planId,
+        uint256 expectedPrice,
+        uint64 expectedInterval,
+        uint16 maxFeeBps
+    ) public onlyInitialized nonReentrant whenNotPaused whenProtocolNotPaused {
         Plan memory plan = _activePlan(planId);
         Subscription storage sub = _subscriptions[msg.sender][planId];
         if (isSubscribed(msg.sender, planId)) revert AlreadySubscribed();
+        (address currentFeeRecipient, uint16 currentFeeBps) = currentFeeConfig();
+        _validatePaymentTerms(plan, expectedPrice, expectedInterval, maxFeeBps, currentFeeBps);
 
         uint64 start = _toUint64(block.timestamp);
         if (plan.interval > type(uint64).max - start) revert ExpiryOverflow();
@@ -223,19 +240,28 @@ contract SubArcSubscriptionV1 {
         sub.expiresAt = expiresAt;
         sub.cancelled = false;
 
-        (uint256 feePaid, uint256 netAmount) = _collectPayment(plan.price);
+        (uint256 feePaid, uint256 netAmount) =
+            _collectPayment(plan.price, currentFeeRecipient, currentFeeBps);
         emit Subscribed(msg.sender, planId, expiresAt, plan.price, feePaid, netAmount);
     }
 
-    function renew() external {
-        renew(DEFAULT_PLAN_ID);
+    function renew(uint256 expectedPrice, uint64 expectedInterval, uint16 maxFeeBps) external {
+        renew(DEFAULT_PLAN_ID, expectedPrice, expectedInterval, maxFeeBps);
     }
 
-    function renew(bytes32 planId) public onlyInitialized nonReentrant whenNotPaused {
+    function renew(bytes32 planId, uint256 expectedPrice, uint64 expectedInterval, uint16 maxFeeBps)
+        public
+        onlyInitialized
+        nonReentrant
+        whenNotPaused
+        whenProtocolNotPaused
+    {
         Plan memory plan = _activePlan(planId);
         Subscription storage sub = _subscriptions[msg.sender][planId];
         if (sub.expiresAt == 0) revert NotSubscribed();
         if (sub.cancelled) revert SubscriptionCancelled();
+        (address currentFeeRecipient, uint16 currentFeeBps) = currentFeeConfig();
+        _validatePaymentTerms(plan, expectedPrice, expectedInterval, maxFeeBps, currentFeeBps);
 
         uint64 currentTime = _toUint64(block.timestamp);
         uint64 start = sub.expiresAt > currentTime ? sub.expiresAt : currentTime;
@@ -243,7 +269,8 @@ contract SubArcSubscriptionV1 {
         uint64 expiresAt = start + plan.interval;
         sub.expiresAt = expiresAt;
 
-        (uint256 feePaid, uint256 netAmount) = _collectPayment(plan.price);
+        (uint256 feePaid, uint256 netAmount) =
+            _collectPayment(plan.price, currentFeeRecipient, currentFeeBps);
         emit Renewed(msg.sender, planId, expiresAt, plan.price, feePaid, netAmount);
     }
 
@@ -371,8 +398,10 @@ contract SubArcSubscriptionV1 {
         if (!plan.active) revert PlanInactive();
     }
 
-    function _collectPayment(uint256 amount) internal returns (uint256 feePaid, uint256 netAmount) {
-        (address currentFeeRecipient, uint16 currentFeeBps) = currentFeeConfig();
+    function _collectPayment(uint256 amount, address currentFeeRecipient, uint16 currentFeeBps)
+        internal
+        returns (uint256 feePaid, uint256 netAmount)
+    {
         feeRecipient = currentFeeRecipient;
         feeBps = currentFeeBps;
 
@@ -380,9 +409,31 @@ contract SubArcSubscriptionV1 {
         netAmount = amount - feePaid;
 
         if (feePaid > 0) {
-            paymentToken.safeTransferFrom(msg.sender, currentFeeRecipient, feePaid);
+            _safeTransferFromExact(msg.sender, currentFeeRecipient, feePaid);
         }
-        paymentToken.safeTransferFrom(msg.sender, address(this), netAmount);
+        _safeTransferFromExact(msg.sender, address(this), netAmount);
+    }
+
+    function _validatePaymentTerms(
+        Plan memory plan,
+        uint256 expectedPrice,
+        uint64 expectedInterval,
+        uint16 maxFeeBps,
+        uint16 currentFeeBps
+    ) internal pure {
+        if (plan.price > expectedPrice) revert PriceChanged();
+        if (plan.interval != expectedInterval) revert IntervalChanged();
+        if (currentFeeBps > maxFeeBps) revert FeeChanged();
+    }
+
+    function _safeTransferFromExact(address from, address to, uint256 amount) internal {
+        if (amount == 0) return;
+        uint256 beforeBalance = IERC20Minimal(paymentToken).balanceOf(to);
+        paymentToken.safeTransferFrom(from, to, amount);
+        uint256 received = IERC20Minimal(paymentToken).balanceOf(to) - beforeBalance;
+        if (received != amount) {
+            revert TransferAmountMismatch(paymentToken, to, amount, received);
+        }
     }
 
     function _toUint64(uint256 value) internal pure returns (uint64) {
