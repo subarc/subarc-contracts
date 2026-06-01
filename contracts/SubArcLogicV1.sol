@@ -2,27 +2,21 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/security/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/security/ReentrancyGuardUpgradeable.sol";
+import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 
 interface ISubArcFactory {
-    function getCurrentFeeBps(address _service) external view returns (uint256);
+    function getCurrentFeeBps(address service) external view returns (uint256);
     function platformWalletAddress() external view returns (address);
+    function paused() external view returns (bool);
 }
 
 /**
  * @title SubArcLogicV1
- * @notice
- * - Abonelik ödemelerini alan ve süreyi yöneten kontrat.
- * - Factory tarafından "Clone" olarak çoğaltılır.
- * - Dinamik fee, Reentrancy koruması ve Pausable özelliği içerir.
- *
- * Frontend notu:
- *  - "Sadece bu ay için onayla"  -> approve(subscriptionPrice)
- *  - "Otomatik yenilemeyi aç"    -> approve(subscriptionPrice * N) veya MaxUint
- *    tamamen dApp tarafında, kontrat değişmeden yapılabilir.
+ * @notice Merchant service clone that owns plans, subscriptions, and renewals.
  */
 contract SubArcLogicV1 is
     Initializable,
@@ -32,197 +26,388 @@ contract SubArcLogicV1 is
 {
     using SafeERC20Upgradeable for IERC20Upgradeable;
 
-    // -------------------------------------------------------------------------
-    // Custom Errors (Gas-optimal revert nedenleri)
-    // -------------------------------------------------------------------------
+    error InvalidAddress();
+    error InvalidPrice();
+    error InvalidInterval();
+    error InvalidDefaultPlan();
+    error InvalidPlan();
+    error InactivePlan();
+    error FactoryPaused();
+    error PriceMismatch();
+    error IntervalMismatch();
+    error FeeExceedsMax();
+    error ActiveSubscriptionLocked();
+    error SubscriptionNotDue();
+    error RenewalWindowExpired();
+    error NoActiveSubscription();
+    error NoFunds();
+    error NoBalance();
+    error InvalidToken();
+    error RenounceDisabled();
 
-    error InvalidAddress();      // owner / token / factory 0x0 ise
-    error InvalidInterval();     // interval 0 ise
-    error PriceNotSet();         // subscriptionPrice 0 ise
-    error NoFunds();             // çekilecek paymentToken yoksa
-    error NoBalance();           // recover edilecek token yoksa
-    error InvalidToken();        // recoverERC20 için paymentToken kullanılmışsa
+    uint256 public constant MAX_FEE_BPS = 1000;
+    uint256 public constant RENEWAL_GRACE_PERIOD = 7 days;
 
-    // -------------------------------------------------------------------------
-    // State Variables
-    // -------------------------------------------------------------------------
-
-    IERC20Upgradeable public paymentToken;   // Kullanıcıdan alınan token (örn: USDC)
-    address public factory;                 // Bağlı olduğu Factory adresi
-
-    uint256 public subscriptionPrice;       // Tek plan abonelik ücreti
-    uint256 public interval;               // Abonelik süresi (saniye cinsinden)
-
-    // Güvenlik: Factory yanlış davranırsa bile fee %50'yi geçemez
-    uint256 private constant MAX_FEE_BPS = 5000; // 5000 = %50
+    struct Plan {
+        uint256 price;
+        uint256 interval;
+        bool isActive;
+    }
 
     struct Subscriber {
-        uint256 expiresAt; // Abonelik bitiş zamanı (timestamp)
+        uint256 planId;
+        uint256 expiresAt;
+        bool canceled;
+        uint256 agreedPrice;
+        uint256 agreedInterval;
+        uint256 maxFeeBps;
     }
+
+    IERC20Upgradeable public paymentToken;
+    address public factory;
+    uint256 public defaultPlanId;
+    uint256 public planCount;
+
+    mapping(uint256 => Plan) public plans;
     mapping(address => Subscriber) public subscribers;
 
-    // -------------------------------------------------------------------------
-    // Events
-    // -------------------------------------------------------------------------
-
+    event PlanCreated(uint256 indexed planId, uint256 price, uint256 interval, bool isDefault);
+    event PlanUpdated(uint256 indexed planId, uint256 price, uint256 interval, bool isActive);
     event Subscribed(
         address indexed user,
+        uint256 indexed planId,
         uint256 expiresAt,
+        uint256 agreedPrice,
+        uint256 agreedInterval,
         uint256 feePaid,
         uint256 netAmount
     );
+    event Renewed(
+        address indexed user,
+        uint256 indexed planId,
+        address indexed triggeredBy,
+        uint256 expiresAt,
+        uint256 agreedPrice,
+        uint256 agreedInterval,
+        uint256 feePaid,
+        uint256 netAmount
+    );
+    event SubscriptionCancelled(address indexed user, uint256 indexed planId);
     event FundsWithdrawn(address indexed owner, address indexed token, uint256 amount);
-    event ConfigUpdated(uint256 newPrice, uint256 newInterval);
+    event ConfigUpdated(uint256 indexed planId, uint256 newPrice, uint256 newInterval);
     event Recovered(address indexed token, uint256 amount);
-
-    // -------------------------------------------------------------------------
-    // Initialization
-    // -------------------------------------------------------------------------
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
-        // Implementation kontratının doğrudan initialize edilmesini engeller.
         _disableInitializers();
     }
 
-    /**
-     * @notice Factory tarafından clone oluşturulurken çağrılır.
-     * @dev Proxy pattern'deki constructor yerine geçer.
-     */
     function initialize(
-        address _owner,
-        address _token,
-        uint256 _price,
-        uint256 _interval,
-        address _factory
+        address owner_,
+        address token_,
+        uint256 defaultPrice_,
+        uint256 defaultInterval_,
+        address factory_
     ) external initializer {
-        // 1. Input Validation (Custom Errors ile)
-        if (_owner == address(0) || _token == address(0) || _factory == address(0)) {
+        if (
+            owner_ == address(0) ||
+            token_ == address(0) ||
+            factory_ == address(0) ||
+            token_.code.length == 0 ||
+            factory_.code.length == 0
+        ) {
             revert InvalidAddress();
         }
-        if (_interval == 0) {
-            revert InvalidInterval();
+        if (
+            (defaultPrice_ == 0 && defaultInterval_ != 0) ||
+            (defaultPrice_ != 0 && defaultInterval_ == 0)
+        ) {
+            revert InvalidDefaultPlan();
         }
 
-        // 2. Modülleri başlat
         __Ownable_init();
         __Pausable_init();
         __ReentrancyGuard_init();
 
-        _transferOwnership(_owner);
+        _transferOwnership(owner_);
 
-        // 3. Değer Atamaları
-        paymentToken = IERC20Upgradeable(_token);
-        subscriptionPrice = _price;
-        interval = _interval;
-        factory = _factory;
+        paymentToken = IERC20Upgradeable(token_);
+        factory = factory_;
+
+        if (defaultPrice_ > 0) {
+            defaultPlanId = _createPlan(defaultPrice_, defaultInterval_, true);
+        }
     }
 
-    // -------------------------------------------------------------------------
-    // Core Logic
-    // -------------------------------------------------------------------------
+    function subscribe(
+        uint256 planId,
+        uint256 expectedPrice,
+        uint256 expectedInterval,
+        uint256 maxFeeBps
+    ) external nonReentrant whenNotPaused {
+        _subscribe(msg.sender, planId, expectedPrice, expectedInterval, maxFeeBps);
+    }
 
     /**
-     * @notice Kullanıcı abone olur veya süresini uzatır.
-     * @dev Reentrancy ve Pause korumalıdır.
+     * @notice Called by the relayer or any external automation. Funds are still
+     *         pulled by this contract from the subscriber allowance.
      */
-    function subscribe() external nonReentrant whenNotPaused {
-        if (subscriptionPrice == 0) {
-            revert PriceNotSet();
+    function renew(address user) external nonReentrant whenNotPaused {
+        uint256 currentFeeBps = _requireFactoryActiveAndGetFeeBps();
+        Subscriber storage subscription = subscribers[user];
+
+        if (subscription.planId == 0 || subscription.canceled) {
+            revert NoActiveSubscription();
+        }
+        if (subscription.expiresAt > block.timestamp) {
+            revert SubscriptionNotDue();
+        }
+        if (block.timestamp > subscription.expiresAt + RENEWAL_GRACE_PERIOD) {
+            revert RenewalWindowExpired();
+        }
+        if (currentFeeBps > subscription.maxFeeBps) {
+            revert FeeExceedsMax();
         }
 
-        // A. Factory'den dinamik fee bps bilgisini al
-        uint256 feeBps = ISubArcFactory(factory).getCurrentFeeBps(address(this));
+        _collectAndRecordRenewal(user, currentFeeBps, msg.sender);
+    }
+
+    /**
+     * @notice Cancellation must remain available even if the service or factory is paused.
+     */
+    function cancelSubscription() external {
+        Subscriber storage subscription = subscribers[msg.sender];
+        if (subscription.planId == 0 || subscription.canceled) {
+            revert NoActiveSubscription();
+        }
+
+        subscription.canceled = true;
+        emit SubscriptionCancelled(msg.sender, subscription.planId);
+    }
+
+    function _subscribe(
+        address user,
+        uint256 planId,
+        uint256 expectedPrice,
+        uint256 expectedInterval,
+        uint256 maxFeeBps
+    ) internal {
+        Plan memory plan = plans[planId];
+        if (planId == 0 || plan.interval == 0) {
+            revert InvalidPlan();
+        }
+        if (!plan.isActive) {
+            revert InactivePlan();
+        }
+        if (plan.price != expectedPrice) {
+            revert PriceMismatch();
+        }
+        if (plan.interval != expectedInterval) {
+            revert IntervalMismatch();
+        }
+        if (maxFeeBps > MAX_FEE_BPS) {
+            revert FeeExceedsMax();
+        }
+
+        uint256 currentFeeBps = _requireFactoryActiveAndGetFeeBps();
+        if (currentFeeBps > maxFeeBps) {
+            revert FeeExceedsMax();
+        }
+
+        Subscriber storage existing = subscribers[user];
+        if (
+            existing.planId != 0 &&
+            !existing.canceled &&
+            existing.expiresAt > block.timestamp &&
+            existing.planId != planId
+        ) {
+            revert ActiveSubscriptionLocked();
+        }
+
+        _collectAndRecordInitial(user, planId, expectedPrice, expectedInterval, maxFeeBps, currentFeeBps);
+    }
+
+    function _collectAndRecordInitial(
+        address user,
+        uint256 planId,
+        uint256 agreedPrice,
+        uint256 agreedInterval,
+        uint256 maxFeeBps,
+        uint256 currentFeeBps
+    ) internal {
+        uint256 feeAmount = (agreedPrice * currentFeeBps) / 10000;
+        uint256 merchantAmount = agreedPrice - feeAmount;
         address platformWallet = ISubArcFactory(factory).platformWalletAddress();
 
-        // B. Factory bozulsa bile üst limit
-        if (feeBps > MAX_FEE_BPS) {
-            feeBps = MAX_FEE_BPS;
-        }
-
-        // C. Hesaplamalar (10000 baz puan üzerinden)
-        uint256 feeAmount = (subscriptionPrice * feeBps) / 10000;
-        uint256 merchantAmount = subscriptionPrice - feeAmount;
-
-        // D. Transferler
-        // 1) Platform payı
         if (feeAmount > 0 && platformWallet != address(0)) {
-            paymentToken.safeTransferFrom(msg.sender, platformWallet, feeAmount);
+            paymentToken.safeTransferFrom(user, platformWallet, feeAmount);
         }
-
-        // 2) Service payı (bu kontratta birikir, owner withdrawFunds ile çeker)
         if (merchantAmount > 0) {
-            paymentToken.safeTransferFrom(msg.sender, address(this), merchantAmount);
+            paymentToken.safeTransferFrom(user, address(this), merchantAmount);
         }
 
-        // E. Abonelik süresini güncelle
-        _handleSubscription(msg.sender);
+        uint256 expiry = _recordInitialSubscription(user, planId, agreedPrice, agreedInterval, maxFeeBps);
 
         emit Subscribed(
-            msg.sender,
-            subscribers[msg.sender].expiresAt,
+            user,
+            planId,
+            expiry,
+            agreedPrice,
+            agreedInterval,
             feeAmount,
             merchantAmount
         );
     }
 
-    function _handleSubscription(address user) internal {
-        uint256 currentExpiry = subscribers[user].expiresAt;
+    function _collectAndRecordRenewal(address user, uint256 currentFeeBps, address triggeredBy) internal {
+        Subscriber storage subscription = subscribers[user];
+        uint256 feeAmount = (subscription.agreedPrice * currentFeeBps) / 10000;
+        uint256 merchantAmount = subscription.agreedPrice - feeAmount;
+        address platformWallet = ISubArcFactory(factory).platformWalletAddress();
+
+        if (feeAmount > 0 && platformWallet != address(0)) {
+            paymentToken.safeTransferFrom(user, platformWallet, feeAmount);
+        }
+        if (merchantAmount > 0) {
+            paymentToken.safeTransferFrom(user, address(this), merchantAmount);
+        }
+
+        subscription.expiresAt = block.timestamp + subscription.agreedInterval;
+        subscription.canceled = false;
+
+        emit Renewed(
+            user,
+            subscription.planId,
+            triggeredBy,
+            subscription.expiresAt,
+            subscription.agreedPrice,
+            subscription.agreedInterval,
+            feeAmount,
+            merchantAmount
+        );
+    }
+
+    function _recordInitialSubscription(
+        address user,
+        uint256 planId,
+        uint256 agreedPrice,
+        uint256 agreedInterval,
+        uint256 maxFeeBps
+    ) internal returns (uint256) {
+        Subscriber storage subscription = subscribers[user];
+        uint256 currentExpiry = subscription.expiresAt;
         uint256 newExpiry;
 
-        if (currentExpiry > block.timestamp) {
-            // Zaten aktifse, süreyi uzat
-            newExpiry = currentExpiry + interval;
+        // Same-plan active re-subscribe is intentional MVP behavior: paying again prepays
+        // one more interval instead of silently switching the subscriber to another plan.
+        if (
+            subscription.planId == planId &&
+            !subscription.canceled &&
+            currentExpiry > block.timestamp
+        ) {
+            newExpiry = currentExpiry + agreedInterval;
         } else {
-            // Yeni abonelik veya süresi dolmuş aboneliği yeniden başlat
-            newExpiry = block.timestamp + interval;
+            newExpiry = block.timestamp + agreedInterval;
         }
 
-        subscribers[user].expiresAt = newExpiry;
+        subscription.planId = planId;
+        subscription.expiresAt = newExpiry;
+        subscription.canceled = false;
+        subscription.agreedPrice = agreedPrice;
+        subscription.agreedInterval = agreedInterval;
+        subscription.maxFeeBps = maxFeeBps;
+
+        return newExpiry;
     }
 
-    // -------------------------------------------------------------------------
-    // View Functions
-    // -------------------------------------------------------------------------
+    function _requireFactoryActiveAndGetFeeBps() internal view returns (uint256 currentFeeBps) {
+        if (ISubArcFactory(factory).paused()) {
+            revert FactoryPaused();
+        }
 
-    /**
-     * @notice Kullanıcının şu anda aktif aboneliği var mı?
-     */
-    function isSubscribed(address _user) external view returns (bool) {
-        return subscribers[_user].expiresAt > block.timestamp;
+        currentFeeBps = ISubArcFactory(factory).getCurrentFeeBps(address(this));
+        if (currentFeeBps > MAX_FEE_BPS) {
+            currentFeeBps = MAX_FEE_BPS;
+        }
     }
 
-    /**
-     * @notice Kullanıcının abonelik bitiş zamanını ve aktiflik durumunu döner.
-     */
-    function getSubscriptionDetails(address _user)
+    function isSubscribed(address user) external view returns (bool) {
+        Subscriber memory subscription = subscribers[user];
+        return !subscription.canceled && subscription.expiresAt > block.timestamp;
+    }
+
+    function getSubscriptionDetails(address user)
         external
         view
-        returns (uint256 expiry, bool isActive)
+        returns (
+            uint256 planId,
+            uint256 expiry,
+            bool isActive,
+            bool canceled,
+            uint256 agreedPrice,
+            uint256 agreedInterval,
+            uint256 maxFeeBps
+        )
     {
-        expiry = subscribers[_user].expiresAt;
-        isActive = expiry > block.timestamp;
+        Subscriber memory subscription = subscribers[user];
+        planId = subscription.planId;
+        expiry = subscription.expiresAt;
+        canceled = subscription.canceled;
+        isActive = !canceled && expiry > block.timestamp;
+        agreedPrice = subscription.agreedPrice;
+        agreedInterval = subscription.agreedInterval;
+        maxFeeBps = subscription.maxFeeBps;
     }
 
-    /**
-     * @notice Kullanıcının aboneliğinde kaç saniye kaldığını döner.
-     * @dev UI tarafında bu değer gün cinsine çevrilip gösterilebilir.
-     */
-    function getRemainingTime(address _user) external view returns (uint256) {
-        uint256 expiry = subscribers[_user].expiresAt;
-        if (expiry <= block.timestamp) {
+    function getRemainingTime(address user) external view returns (uint256) {
+        Subscriber memory subscription = subscribers[user];
+        if (subscription.canceled || subscription.expiresAt <= block.timestamp) {
             return 0;
         }
-        return expiry - block.timestamp;
+        return subscription.expiresAt - block.timestamp;
     }
 
-    // -------------------------------------------------------------------------
-    // Admin Functions (Service Owner)
-    // -------------------------------------------------------------------------
+    function getPlan(uint256 planId) external view returns (Plan memory) {
+        return plans[planId];
+    }
 
-    /**
-     * @notice Service sahibinin biriken hasılatı çekmesi için.
-     */
+    function createPlan(uint256 price, uint256 interval) external onlyOwner returns (uint256) {
+        return _createPlan(price, interval, false);
+    }
+
+    function updatePlan(uint256 planId, uint256 price, uint256 interval, bool isActive) public onlyOwner {
+        if (planId == 0 || plans[planId].interval == 0) {
+            revert InvalidPlan();
+        }
+        if (price == 0) {
+            revert InvalidPrice();
+        }
+        if (interval == 0) {
+            revert InvalidInterval();
+        }
+
+        plans[planId] = Plan({price: price, interval: interval, isActive: isActive});
+        emit PlanUpdated(planId, price, interval, isActive);
+    }
+
+    function _createPlan(uint256 price, uint256 interval, bool markDefault) internal returns (uint256 planId) {
+        if (price == 0) {
+            revert InvalidPrice();
+        }
+        if (interval == 0) {
+            revert InvalidInterval();
+        }
+
+        planId = ++planCount;
+        plans[planId] = Plan({price: price, interval: interval, isActive: true});
+
+        if (markDefault && defaultPlanId == 0) {
+            defaultPlanId = planId;
+        }
+
+        emit PlanCreated(planId, price, interval, markDefault);
+    }
+
     function withdrawFunds() external nonReentrant onlyOwner {
         uint256 balance = paymentToken.balanceOf(address(this));
         if (balance == 0) {
@@ -233,51 +418,39 @@ contract SubArcLogicV1 is
         emit FundsWithdrawn(msg.sender, address(paymentToken), balance);
     }
 
-    /**
-     * @notice Yanlışlıkla bu kontrata gönderilen diğer tokenları kurtarır.
-     * @dev paymentToken için kullanılamaz, onun için withdrawFunds kullanılmalı.
-     */
-    function recoverERC20(address _token) external nonReentrant onlyOwner {
-        if (_token == address(paymentToken)) {
+    function recoverERC20(address token) external nonReentrant onlyOwner {
+        if (token == address(paymentToken)) {
             revert InvalidToken();
         }
 
-        uint256 balance = IERC20Upgradeable(_token).balanceOf(address(this));
+        uint256 balance = IERC20Upgradeable(token).balanceOf(address(this));
         if (balance == 0) {
             revert NoBalance();
         }
 
-        IERC20Upgradeable(_token).safeTransfer(msg.sender, balance);
-        emit Recovered(_token, balance);
+        IERC20Upgradeable(token).safeTransfer(msg.sender, balance);
+        emit Recovered(token, balance);
     }
 
-    /**
-     * @notice Service sahibinin abonelik fiyatı ve süresini güncellemesi için.
-     */
-    function updateConfig(uint256 _newPrice, uint256 _newInterval) external onlyOwner {
-        if (_newInterval == 0) {
-            revert InvalidInterval();
+    function updateConfig(uint256 newPrice, uint256 newInterval) external onlyOwner {
+        if (defaultPlanId == 0) {
+            defaultPlanId = _createPlan(newPrice, newInterval, true);
+        } else {
+            updatePlan(defaultPlanId, newPrice, newInterval, true);
         }
-        subscriptionPrice = _newPrice;
-        interval = _newInterval;
-        emit ConfigUpdated(_newPrice, _newInterval);
+
+        emit ConfigUpdated(defaultPlanId, newPrice, newInterval);
     }
 
-    // -------------------------------------------------------------------------
-    // Pause Controls (Service Owner)
-    // -------------------------------------------------------------------------
-
-    /**
-     * @notice Acil durumlarda abonelik alımlarını durdurur.
-     */
     function pause() external onlyOwner {
         _pause();
     }
 
-    /**
-     * @notice Durdurulan abonelik alımlarını yeniden açar.
-     */
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 }
