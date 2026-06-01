@@ -246,6 +246,47 @@ describe("SubArc Service Factory + Arc-native Recurring Billing", function () {
       expect(info[2]).to.equal(FREE_TIER_BPS);
     });
 
+    it("requires an active enterprise license before enabling a custom fee", async function () {
+      const { factory, paymentToken, merchant, owner } = await loadFixture(deployFixture);
+
+      const service = await createService(
+        factory.connect(merchant)["createService(address,uint256,uint256)"](
+          await paymentToken.getAddress(),
+          SUB_PRICE,
+          MONTH
+        ),
+        factory
+      );
+
+      await expect(
+        factory.connect(owner).setCustomFee(await service.getAddress(), 25, true)
+      ).to.be.revertedWith("Enterprise tier required");
+    });
+
+    it("custom fee stops applying once the enterprise license expires", async function () {
+      const { factory, paymentToken, merchant, owner } = await loadFixture(deployFixture);
+
+      const service = await createService(
+        factory.connect(merchant)["createService(address,uint256,uint256)"](
+          await paymentToken.getAddress(),
+          SUB_PRICE,
+          MONTH
+        ),
+        factory
+      );
+
+      await paymentToken.connect(merchant).approve(await factory.getAddress(), ethers.parseUnits("500", 6));
+      await factory.connect(merchant).purchaseTier(await service.getAddress(), 2);
+      await factory.connect(owner).setCustomFee(await service.getAddress(), 25, true);
+
+      expect(await factory.getCurrentFeeBps(await service.getAddress())).to.equal(25n);
+
+      const license = await factory.serviceLicenses(await service.getAddress());
+      await time.increaseTo(license.expiresAt + 1n);
+
+      expect(await factory.getCurrentFeeBps(await service.getAddress())).to.equal(FREE_TIER_BPS);
+    });
+
     it("free tier cannot have price > 0", async function () {
       const { factory } = await loadFixture(deployFixture);
 
@@ -502,21 +543,24 @@ describe("SubArc Service Factory + Arc-native Recurring Billing", function () {
 
     it("fee increase above subscriber maxFeeBps blocks renewal", async function () {
       const { factory, paymentToken, merchant, subscriber, relayer, owner } = await loadFixture(deployFixture);
+      const week = 7 * 24 * 3600;
 
       const service = await createService(
         factory.connect(merchant)["createService(address,uint256,uint256)"](
           await paymentToken.getAddress(),
           SUB_PRICE,
-          MONTH
+          week
         ),
         factory
       );
 
       await paymentToken.connect(subscriber).approve(await service.getAddress(), SUB_PRICE * 2n);
-      await service.connect(subscriber).subscribe(1, SUB_PRICE, MONTH, 500);
+      await service.connect(subscriber).subscribe(1, SUB_PRICE, week, 500);
 
+      await paymentToken.connect(merchant).approve(await factory.getAddress(), ethers.parseUnits("500", 6));
+      await factory.connect(merchant).purchaseTier(await service.getAddress(), 2);
       await factory.connect(owner).setCustomFee(await service.getAddress(), 600, true);
-      await time.increase(MONTH + 1);
+      await time.increase(week + 1);
 
       await expect(service.connect(relayer).renew(subscriber.address))
         .to.be.revertedWithCustomError(service, "FeeExceedsMax");

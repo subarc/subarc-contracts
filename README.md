@@ -69,6 +69,7 @@ Core contracts:
   - generated runtime manifests
 - `docs/`
   - `DEMO_FLOW.md`
+  - `MONETIZATION_POLICY.md`
   - `MVP_INTEGRATION.md`
   - `SECURITY_NOTES.md`
 - `test/`

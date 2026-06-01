@@ -183,6 +183,49 @@ describe("SubArc relayer/indexer MVP service", function () {
     expect(results[0].failureReason).to.equal("insufficient-allowance");
   });
 
+  it("allows an immediate retry when duplicateWindowMs is explicitly zero", async function () {
+    const { paymentToken, logicImpl, factory, platformWallet, merchant, subscriber, relayer } =
+      await loadFixture(deployFixture);
+
+    const service = await createService(
+      factory.connect(merchant)["createService(address,uint256,uint256)"](
+        await paymentToken.getAddress(),
+        SUB_PRICE,
+        MONTH
+      ),
+      factory
+    );
+
+    await paymentToken.connect(subscriber).approve(await service.getAddress(), SUB_PRICE);
+    await service.connect(subscriber).subscribe(1, SUB_PRICE, MONTH, 1000);
+    await paymentToken.connect(subscriber).approve(await service.getAddress(), 0);
+
+    const manifest = buildManifest({ paymentToken, logicImpl, factory, platformWallet });
+    const relayerService = new SubArcRelayerService({
+      provider: ethers.provider,
+      signer: relayer,
+      manifest,
+      state: defaultState(),
+      options: { duplicateWindowMs: 0 },
+    });
+
+    await relayerService.scan();
+    const expiry = (await service.getSubscriptionDetails(subscriber.address)).expiry;
+    await time.increaseTo(expiry + 1n);
+
+    const firstResults = await relayerService.renewDueSubscriptions();
+    expect(firstResults).to.have.length(1);
+    expect(firstResults[0].status).to.equal("skipped");
+    expect(firstResults[0].failureReason).to.equal("insufficient-allowance");
+
+    await paymentToken.connect(subscriber).approve(await service.getAddress(), SUB_PRICE);
+
+    const secondResults = await relayerService.renewDueSubscriptions();
+    expect(secondResults).to.have.length(1);
+    expect(secondResults[0].status).to.equal("submitted");
+    expect(secondResults[0].txHash).to.be.a("string");
+  });
+
   it("builds a status summary from local relayer state", async function () {
     const { paymentToken, logicImpl, factory, platformWallet, merchant, subscriber, relayer } =
       await loadFixture(deployFixture);

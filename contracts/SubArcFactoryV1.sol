@@ -74,6 +74,8 @@ contract SubArcFactoryV1 is Ownable, Pausable {
     mapping(address => address) public serviceOwner;
     mapping(address => License) public serviceLicenses;
     mapping(address => address[]) public servicesByOwner;
+    // Custom fees are reserved for negotiated enterprise arrangements.
+    // Public self-serve pricing should come from the tier table below.
     mapping(address => uint256) public customFees;
     mapping(address => bool) public hasCustomFee;
 
@@ -86,6 +88,9 @@ contract SubArcFactoryV1 is Ownable, Pausable {
         paymentToken = IERC20(paymentToken_);
         platformWallet = wallet_;
 
+        // Public pricing presets. Enterprise starts from a clean onchain default,
+        // while negotiated deals can use `setCustomFee` when an active enterprise
+        // license is present for the service.
         tiers[TIER_FREE] = TierInfo({price: 0, feeBps: 500, duration: 0, isActive: true});
         tiers[TIER_PRO] = TierInfo({
             price: 50 * (10 ** PAYMENT_TOKEN_DECIMALS),
@@ -166,7 +171,7 @@ contract SubArcFactoryV1 is Ownable, Pausable {
     function getCurrentFeeBps(address service) external view returns (uint256) {
         require(isService[service], "Unknown service");
 
-        if (hasCustomFee[service]) {
+        if (_hasActiveCustomFee(service)) {
             return customFees[service];
         }
 
@@ -188,7 +193,7 @@ contract SubArcFactoryV1 is Ownable, Pausable {
         License memory license = serviceLicenses[service];
         uint256 feeBps;
 
-        if (hasCustomFee[service]) {
+        if (_hasActiveCustomFee(service)) {
             feeBps = customFees[service];
             customActive = true;
         } else if (license.expiresAt <= block.timestamp) {
@@ -207,6 +212,9 @@ contract SubArcFactoryV1 is Ownable, Pausable {
     function setCustomFee(address service, uint256 feeBps, bool active) external onlyOwner {
         require(isService[service], "Unknown service");
         require(feeBps <= MAX_FEE_BPS, "Fee too high");
+        if (active) {
+            require(_hasActiveEnterpriseLicense(service), "Enterprise tier required");
+        }
 
         customFees[service] = feeBps;
         hasCustomFee[service] = active;
@@ -270,5 +278,14 @@ contract SubArcFactoryV1 is Ownable, Pausable {
 
     function getServicesByOwner(address owner_) external view returns (address[] memory) {
         return servicesByOwner[owner_];
+    }
+
+    function _hasActiveEnterpriseLicense(address service) internal view returns (bool) {
+        License memory license = serviceLicenses[service];
+        return license.tierId == TIER_ENTERPRISE && license.expiresAt > block.timestamp;
+    }
+
+    function _hasActiveCustomFee(address service) internal view returns (bool) {
+        return hasCustomFee[service] && _hasActiveEnterpriseLicense(service);
     }
 }

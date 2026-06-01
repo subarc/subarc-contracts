@@ -68,7 +68,9 @@ class SubArcRelayerService {
     this.options = {
       confirmationBlocks: Number(options.confirmationBlocks || 0),
       duplicateWindowMs:
-        Number(options.duplicateWindowMs || DEFAULT_DUPLICATE_WINDOW_MS),
+        options.duplicateWindowMs == null
+          ? DEFAULT_DUPLICATE_WINDOW_MS
+          : Number(options.duplicateWindowMs),
       renewalGracePeriodSeconds: BigInt(
         options.renewalGracePeriodSeconds || DEFAULT_RENEWAL_GRACE_PERIOD_SECONDS
       ),
