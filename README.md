@@ -222,10 +222,6 @@ Logic:
 
 - [MVP integration notes](docs/MVP_INTEGRATION.md)
 
-Historical note:
-
-- `docs/SECURITY_AND_GAMIFICATION_ANALYSIS.md` is an older exploratory document and should not be treated as the current MVP product spec.
-
 ## Notes
 
 - Arc testnet MVP is USDC-only at the service creation layer.
