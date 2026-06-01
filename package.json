@@ -1,14 +1,27 @@
 {
-  "name": "@subarc/contracts",
-  "version": "0.2.0",
+  "name": "subarc",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "forge build",
-    "test": "forge test -vv",
-    "coverage": "forge coverage --summary",
-    "abi:generate": "node scripts/generate-abis.mjs",
-    "forge:build": "forge build",
-    "forge:test": "forge test -vv",
-    "forge:deploy:arc-testnet": "forge script script/DeployArcTestnet.s.sol --rpc-url \"$ARC_TESTNET_RPC_URL\" --broadcast --verify"
+    "test": "hardhat test",
+    "deploy:arc": "hardhat run scripts/deploy-arc-testnet.js --network arcTestnet",
+    "relayer:scan": "node scripts/relayer-cli.js scan",
+    "relayer:once": "node scripts/relayer-cli.js once",
+    "relayer:loop": "node scripts/relayer-cli.js loop",
+    "verify:arc:logic": "hardhat verify --network arcTestnet",
+    "verify:arc:factory": "hardhat verify --network arcTestnet"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-ethers": "^3.1.2",
+    "@nomicfoundation/hardhat-toolbox": "^6.1.0",
+    "@openzeppelin/contracts": "4.9.6",
+    "@openzeppelin/contracts-upgradeable": "4.9.6",
+    "@openzeppelin/hardhat-upgrades": "^3.9.1",
+    "chai": "^4.5.0",
+    "ethers": "^6.14.0",
+    "hardhat": "^2.27.1"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
   }
 }

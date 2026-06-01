@@ -1,94 +1,234 @@
 # SubArc Contracts
 
-Foundry workspace for the SubArc MVP contracts.
+SubArc is an Arc-native recurring USDC billing MVP built around a factory + clone architecture.
 
-> Security status: MVP/testnet code. It is not third-party audited and should not be
-> marketed as production-ready or fully automated recurring billing until an
-> external audit, production deployment review, and operational multisig/timelock
-> setup are complete.
+This repository contains the frozen Arc testnet MVP contracts plus the minimum off-chain tooling needed to demo the product end-to-end:
 
-## Contracts
+- contract deployment on Arc testnet
+- deployment manifest generation
+- local relayer/indexer service
+- Hardhat test coverage for contracts and relayer flow
 
-- `SubArcFactory.sol`: merchant registration, clone-based service creation, service ownership registry, payment-token whitelist, global pause, platform fee config, and paid merchant tier licenses.
-- `SubArcSubscription.sol`: merchant-owned prepaid subscription contract with guarded subscribe, guarded renew, cancel, plan creation, status checks, and merchant withdrawal.
-- Both contracts expose a versioned V1 API and include pause controls, fee caps, reentrancy protection, strict ERC-20 transfer accounting, payment-token rescue protections, and implementation-initializer locks.
+SubArc MVP scope is intentionally narrow:
 
-## Positioning
+- `SubArcFactoryV1` deploys and indexes merchant services
+- `SubArcLogicV1` handles plans, subscriptions, renewals, and merchant withdrawals
+- subscribers agree to price, interval, and fee cap at subscribe time
+- renewals are triggered off-chain by a relayer via `renew(user)`
+- Circle Gateway is not part of the contracts and remains a future frontend/backend funding layer
 
-SubArc V1 is an Arc-native subscription contract factory for prepaid on-chain
-access, with renewal-ready infrastructure. It does not automatically pull future
-payments from subscribers. Production recurring billing should be built later
-with signed renewal intents, Permit2/ERC-2612, account abstraction session keys,
-or another explicit user-authorization layer.
+Not included in this repository or MVP:
 
-## Payment Model
+- DAO
+- token
+- staking
+- governance
+- keeper network
+- Gateway smart contracts
 
-- Amounts are raw ERC-20 units. For USDC, use 6-decimal amounts such as `10_000000` for 10 USDC.
-- Service subscription payments are split at payment time. The platform fee goes directly to the current factory `feeRecipient`; net merchant proceeds remain in the service contract until merchant withdrawal.
-- Subscribers must pass payment guards when subscribing or renewing:
-  - `expectedPrice`: maximum accepted plan price.
-  - `expectedInterval`: exact accepted plan interval.
-  - `maxFeeBps`: maximum accepted platform fee.
-- Existing services read the current factory fee recipient during each payment.
-- Free-tier services read the current platform fee. Paid tier licenses snapshot
-  the tier fee at purchase time, so later tier updates do not retroactively
-  change an active license.
-- Paid merchant tiers are purchased with the service payment token. Default tiers assume USDC-style 6-decimal units:
-  - Free: platform fee configured at factory deploy time.
-  - Pro: 50 USDC for 30 days, 1% fee.
-  - Enterprise: 500 USDC for 30 days, 0.1% fee.
-- Payment token addresses must be explicitly whitelisted by the factory owner
-  and must contain contract code. Default production stance should be verified
-  stablecoins only, such as USDC/EURC on supported networks.
-- Subscription and tier payments check recipient balance deltas. Fee-on-transfer
-  or deflationary tokens are rejected.
+## Repository Layout
 
-## Security Notes
+- `contracts/`
+  - `SubArcFactoryV1.sol`
+  - `SubArcLogicV1.sol`
+  - `mocks/MockUSDC.sol`
+- `scripts/`
+  - `deploy-arc-testnet.js`
+  - `relayer-cli.js`
+  - `relayer/`
+- `deployments/`
+  - `arcTestnet.latest.json`
+- `docs/`
+  - `MVP_INTEGRATION.md`
+- `test/`
+  - contract integration tests
+  - relayer/indexer tests
 
-See `SECURITY.md` for production readiness requirements and reporting guidance.
-
-- Subscription `subscribe` and `renew` are protected by a storage reentrancy guard.
-- Factory global `pause()` blocks new service creation, tier purchases, and
-  existing service subscribe/renew calls.
-- Merchant service `pause()` blocks that service's subscribe/renew calls.
-- Subscribe/renew calls include price, interval, and fee guards to protect users
-  from same-block config or fee changes.
-- ERC-20 transfers support both standard bool-returning tokens and no-return tokens, and revert on failed calls.
-- Merchants cannot rescue the configured payment token; they must use `withdrawFunds`.
-- Factory owner controls payment-token whitelist, platform fee bps, fee recipient,
-  and tier definitions. Fees are capped at 10%. Production owner should be a
-  multisig or timelock-controlled account.
-- Expiry is strictly `expiresAt > block.timestamp`; exact-expiry subscriptions are inactive.
-
-## Commands
+## Quick Start
 
 ```bash
-forge build
-forge test -vv
-npm run abi:generate
-npm run coverage
+npm install
+cp .env.example .env
+npm test
 ```
 
-## Arc Testnet Deploy
+## Environment Variables
+
+Common deploy/runtime fields:
+
+- `PRIVATE_KEY`
+- `PLATFORM_WALLET`
+- `ARC_RPC_URL`
+- `ARC_USDC_ADDRESS`
+- `ARCSCAN_API_KEY`
+- `ARCSCAN_API_URL`
+- `ARCSCAN_BROWSER_URL`
+- `DEPLOY_MOCK_USDC`
+- `MOCK_USDC_NAME`
+- `MOCK_USDC_SYMBOL`
+- `DEPLOYMENT_OUTFILE`
+
+Relayer fields:
+
+- `RELAYER_PRIVATE_KEY`
+- `DEPLOYMENT_MANIFEST_PATH`
+- `RENEWAL_SCAN_INTERVAL_SECONDS`
+
+See [.env.example](.env.example) for the full template.
+
+## Test
 
 ```bash
-export ARC_TESTNET_RPC_URL="https://rpc.testnet.arc.network"
-export PRIVATE_KEY="..."
-export SUBARC_FEE_RECIPIENT="0x..."
-export SUBARC_PLATFORM_FEE_BPS="500"
-export SUBARC_PAYMENT_TOKEN="0x..." # Arc testnet USDC or MockUSDC
-forge script script/DeployArcTestnet.s.sol --rpc-url "$ARC_TESTNET_RPC_URL" --broadcast
+npm test
 ```
 
-The deploy script deploys the factory and whitelists `SUBARC_PAYMENT_TOKEN`.
+Current local suite covers:
 
-The deploy script writes `deployments/arc-testnet.json` with:
+- service creation rules
+- plan validation and agreed-term safety
+- renewal timing and fee-cap rules
+- pause/cancel behavior
+- ownership safety
+- relayer manifest validation
+- relayer indexing and due-renewal execution
 
-- `factory`
-- `subscriptionImplementation`
-- `paymentToken`
-- `feeRecipient`
-- `chainId`
-- `deploymentBlock`
+## Arc Testnet Deployment
 
-Copy `factory` to Hub as `NEXT_PUBLIC_FACTORY_ADDRESS` and `paymentToken` as `NEXT_PUBLIC_USDC_ADDRESS`.
+Deploy the MVP stack to Arc testnet:
+
+```bash
+npm run deploy:arc
+```
+
+The deploy script:
+
+- deploys `SubArcLogicV1`
+- deploys `SubArcFactoryV1`
+- optionally deploys `MockUSDC`
+- writes a machine-readable manifest to `deployments/arcTestnet.latest.json`
+
+Default payment token:
+
+```text
+0x3600000000000000000000000000000000000000
+```
+
+If you want a demo-only token instead of Arc-native USDC:
+
+```bash
+DEPLOY_MOCK_USDC=true npm run deploy:arc
+```
+
+## Contract Verification
+
+Verify logic:
+
+```bash
+npx hardhat verify --network arcTestnet <LOGIC_ADDRESS>
+```
+
+Verify factory:
+
+```bash
+npx hardhat verify --network arcTestnet <FACTORY_ADDRESS> "<LOGIC_ADDRESS>" "<PAYMENT_TOKEN_ADDRESS>" "<PLATFORM_WALLET>"
+```
+
+Verify mock USDC if deployed:
+
+```bash
+npx hardhat verify --network arcTestnet <MOCK_USDC_ADDRESS> "Arc Test USDC" "USDC"
+```
+
+The generated deployment manifest also includes ready-to-run verification commands.
+
+## Relayer / Indexer
+
+The MVP relayer/indexer is a local Node service that:
+
+- reads `deployments/arcTestnet.latest.json`
+- rejects placeholder manifests
+- connects to Arc RPC
+- indexes:
+  - `ServiceCreated`
+  - `PlanCreated`
+  - `Subscribed`
+  - `Renewed`
+  - `SubscriptionCancelled`
+  - `FundsWithdrawn`
+- stores local state in `relayer-data/state.json`
+- detects due subscriptions using chain time
+- checks cancellation, grace window, fee cap, user balance, and user allowance before calling `renew(user)`
+- never custodies user funds
+
+Before running it, make sure `deployments/arcTestnet.latest.json` contains a real deployment and not the checked-in placeholder template.
+
+Scan and index only:
+
+```bash
+npm run relayer:scan
+```
+
+Scan and process due renewals once:
+
+```bash
+npm run relayer:once
+```
+
+Run the relayer loop:
+
+```bash
+npm run relayer:loop
+```
+
+Operational notes:
+
+- the relayer wallet only calls `renew(user)`
+- the subscription contract performs the actual USDC `transferFrom`
+- duplicate renewal attempts for the same `(service, user)` are suppressed for a short cooldown window
+- skip and failure reasons are written into the local state store alongside tx hashes when present
+
+## MVP Demo Flow
+
+1. Deploy `SubArcLogicV1` and `SubArcFactoryV1`.
+2. Merchant creates a service with the factory.
+3. Merchant creates a paid plan.
+4. Subscriber approves USDC to the service.
+5. Subscriber calls `subscribe(planId, expectedPrice, expectedInterval, maxFeeBps)`.
+6. The relayer waits until expiry, then calls `renew(subscriber)`.
+7. Merchant calls `withdrawFunds()`.
+8. The dashboard shows protocol fee accounting, merchant net amounts, and subscription state.
+
+## Dashboard Event Sources
+
+Factory:
+
+- `ServiceCreated`
+- `SubscriptionPurchased`
+- `CustomFeeSet`
+- `TierUpdated`
+- `PlatformWalletUpdated`
+
+Logic:
+
+- `PlanCreated`
+- `PlanUpdated`
+- `Subscribed`
+- `Renewed`
+- `SubscriptionCancelled`
+- `FundsWithdrawn`
+- `ConfigUpdated`
+
+## Additional Docs
+
+- [MVP integration notes](docs/MVP_INTEGRATION.md)
+
+Historical note:
+
+- `docs/SECURITY_AND_GAMIFICATION_ANALYSIS.md` is an older exploratory document and should not be treated as the current MVP product spec.
+
+## Notes
+
+- Arc testnet MVP is USDC-only at the service creation layer.
+- Same-plan re-subscribe is treated as explicit prepaid extension.
+- Different-plan switching while active is blocked.
+- This repository is prepared for Arc testnet MVP demos, not production mainnet launch.
