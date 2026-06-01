@@ -6,7 +6,13 @@ function defaultState() {
     metadata: {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      manifestPath: null,
+      network: null,
+      factoryAddress: null,
+      paymentTokenAddress: null,
       lastFactoryScanBlock: null,
+      lastServiceScanBlock: null,
+      lastIndexedBlock: null,
     },
     services: {},
     plans: {},

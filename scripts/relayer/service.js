@@ -2,28 +2,28 @@ const { ethers } = require("ethers");
 const { factoryAbi, logicAbi, erc20Abi } = require("./artifacts");
 const { planKey, subscriptionKey, pushRenewalAttempt } = require("./store");
 
-const RENEWAL_GRACE_PERIOD = 7n * 24n * 60n * 60n;
-const DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
-const QUERY_CHUNK_SIZE = 2_000;
+const DEFAULT_RENEWAL_GRACE_PERIOD_SECONDS = 7n * 24n * 60n * 60n;
+const DEFAULT_DUPLICATE_WINDOW_MS = 5 * 60 * 1000;
+const DEFAULT_MAX_BLOCK_RANGE = 5_000;
 
 async function fetchDeploymentBlock(provider, txHash, fallbackBlock) {
-  const receipt = await provider.getTransactionReceipt(txHash);
+  const receipt = txHash ? await provider.getTransactionReceipt(txHash) : null;
   if (receipt && receipt.blockNumber != null) {
     return Number(receipt.blockNumber);
   }
   return fallbackBlock || 0;
 }
 
-async function queryEventsInChunks(contract, eventName, fromBlock, toBlock) {
+async function queryEventsInChunks(contract, filter, fromBlock, toBlock, maxBlockRange) {
   const events = [];
 
   if (toBlock < fromBlock) {
     return events;
   }
 
-  for (let start = fromBlock; start <= toBlock; start += QUERY_CHUNK_SIZE) {
-    const end = Math.min(start + QUERY_CHUNK_SIZE - 1, toBlock);
-    const chunk = await contract.queryFilter(contract.filters[eventName](), start, end);
+  for (let start = fromBlock; start <= toBlock; start += maxBlockRange) {
+    const end = Math.min(start + maxBlockRange - 1, toBlock);
+    const chunk = await contract.queryFilter(filter, start, end);
     events.push(...chunk);
   }
 
@@ -38,7 +38,7 @@ function toBigIntString(value) {
   return BigInt(value).toString();
 }
 
-function isRecentAttempt(state, serviceAddress, userAddress, nowMs) {
+function isRecentAttempt(state, serviceAddress, userAddress, nowMs, duplicateWindowMs) {
   const serviceKey = serviceAddress.toLowerCase();
   const userKey = userAddress.toLowerCase();
 
@@ -46,7 +46,7 @@ function isRecentAttempt(state, serviceAddress, userAddress, nowMs) {
     return (
       attempt.serviceAddress === serviceKey &&
       attempt.userAddress === userKey &&
-      nowMs - new Date(attempt.timestamp).getTime() < DUPLICATE_WINDOW_MS
+      nowMs - new Date(attempt.timestamp).getTime() < duplicateWindowMs
     );
   });
 }
@@ -58,23 +58,42 @@ class SubArcRelayerService {
     manifest,
     state,
     clock = () => Date.now(),
+    options = {},
   }) {
     this.provider = provider;
     this.signer = signer;
     this.manifest = manifest;
     this.state = state;
     this.clock = clock;
+    this.options = {
+      confirmationBlocks: Number(options.confirmationBlocks || 0),
+      duplicateWindowMs:
+        Number(options.duplicateWindowMs || DEFAULT_DUPLICATE_WINDOW_MS),
+      renewalGracePeriodSeconds: BigInt(
+        options.renewalGracePeriodSeconds || DEFAULT_RENEWAL_GRACE_PERIOD_SECONDS
+      ),
+      startBlock:
+        options.startBlock == null || options.startBlock === ""
+          ? null
+          : Number(options.startBlock),
+      maxBlockRange: Number(options.maxBlockRange || DEFAULT_MAX_BLOCK_RANGE),
+    };
 
     this.factory = new ethers.Contract(
-      manifest.contracts.subArcFactoryV1.address,
+      manifest.factoryAddress,
       factoryAbi,
       signer || provider
     );
     this.paymentToken = new ethers.Contract(
-      manifest.paymentToken.address,
+      manifest.paymentTokenAddress,
       erc20Abi,
       signer || provider
     );
+
+    this.state.metadata.manifestPath = manifest.__path || null;
+    this.state.metadata.network = manifest.network;
+    this.state.metadata.factoryAddress = manifest.factoryAddress;
+    this.state.metadata.paymentTokenAddress = manifest.paymentTokenAddress;
   }
 
   getKnownServices() {
@@ -86,22 +105,31 @@ class SubArcRelayerService {
     return BigInt(latestBlock.timestamp);
   }
 
-  async scanFactory() {
+  async getScannableBlockNumber() {
     const latestBlock = Number(await this.provider.getBlockNumber());
+    return Math.max(0, latestBlock - this.options.confirmationBlocks);
+  }
+
+  async scanFactory() {
+    const latestBlock = await this.getScannableBlockNumber();
     const startBlock =
       this.state.metadata.lastFactoryScanBlock == null
-        ? await fetchDeploymentBlock(
-            this.provider,
-            this.manifest.contracts.subArcFactoryV1.deployTransactionHash,
-            this.manifest.rpc && this.manifest.rpc.blockNumber
+        ? Math.max(
+            this.options.startBlock || 0,
+            await fetchDeploymentBlock(
+              this.provider,
+              this.manifest.txHashes.factoryAddress,
+              this.manifest.deploymentBlock
+            )
           )
         : this.state.metadata.lastFactoryScanBlock + 1;
 
     const events = await queryEventsInChunks(
       this.factory,
-      "ServiceCreated",
+      this.factory.filters.ServiceCreated(),
       startBlock,
-      latestBlock
+      latestBlock,
+      this.options.maxBlockRange
     );
 
     for (const event of events) {
@@ -123,20 +151,53 @@ class SubArcRelayerService {
   }
 
   async scanServices() {
-    const latestBlock = Number(await this.provider.getBlockNumber());
+    const latestBlock = await this.getScannableBlockNumber();
     const knownServices = this.getKnownServices();
     let indexedEvents = 0;
 
     for (const serviceRecord of knownServices) {
       const service = new ethers.Contract(serviceRecord.address, logicAbi, this.provider);
-      const fromBlock = Math.max(0, (serviceRecord.lastScannedBlock || serviceRecord.createdAtBlock) + 1);
+      const fromBlock = Math.max(
+        0,
+        (serviceRecord.lastScannedBlock || serviceRecord.createdAtBlock) + 1
+      );
 
       const [planCreated, subscribed, renewed, cancelled, withdrawn] = await Promise.all([
-        queryEventsInChunks(service, "PlanCreated", fromBlock, latestBlock),
-        queryEventsInChunks(service, "Subscribed", fromBlock, latestBlock),
-        queryEventsInChunks(service, "Renewed", fromBlock, latestBlock),
-        queryEventsInChunks(service, "SubscriptionCancelled", fromBlock, latestBlock),
-        queryEventsInChunks(service, "FundsWithdrawn", fromBlock, latestBlock),
+        queryEventsInChunks(
+          service,
+          service.filters.PlanCreated(),
+          fromBlock,
+          latestBlock,
+          this.options.maxBlockRange
+        ),
+        queryEventsInChunks(
+          service,
+          service.filters.Subscribed(),
+          fromBlock,
+          latestBlock,
+          this.options.maxBlockRange
+        ),
+        queryEventsInChunks(
+          service,
+          service.filters.Renewed(),
+          fromBlock,
+          latestBlock,
+          this.options.maxBlockRange
+        ),
+        queryEventsInChunks(
+          service,
+          service.filters.SubscriptionCancelled(),
+          fromBlock,
+          latestBlock,
+          this.options.maxBlockRange
+        ),
+        queryEventsInChunks(
+          service,
+          service.filters.FundsWithdrawn(),
+          fromBlock,
+          latestBlock,
+          this.options.maxBlockRange
+        ),
       ]);
 
       for (const event of planCreated) {
@@ -228,6 +289,9 @@ class SubArcRelayerService {
       serviceRecord.lastScannedBlock = latestBlock;
     }
 
+    this.state.metadata.lastServiceScanBlock = latestBlock;
+    this.state.metadata.lastIndexedBlock = latestBlock;
+
     await this.refreshTrackedSubscriptions();
 
     return { latestBlock, indexedEvents };
@@ -258,16 +322,15 @@ class SubArcRelayerService {
     const nowSeconds = await this.getCurrentChainTimestamp();
 
     return Object.values(this.state.subscriptions).filter((subscription) => {
-      if (subscription.canceled) {
-        return false;
-      }
-
-      if (!subscription.expiresAt) {
+      if (subscription.canceled || !subscription.expiresAt) {
         return false;
       }
 
       const expiresAt = BigInt(subscription.expiresAt);
-      return expiresAt <= nowSeconds && nowSeconds <= expiresAt + RENEWAL_GRACE_PERIOD;
+      return (
+        expiresAt <= nowSeconds &&
+        nowSeconds <= expiresAt + this.options.renewalGracePeriodSeconds
+      );
     });
   }
 
@@ -283,7 +346,15 @@ class SubArcRelayerService {
     const nowSeconds = await this.getCurrentChainTimestamp();
     const nowMs = this.clock();
 
-    if (isRecentAttempt(this.state, subscription.serviceAddress, subscription.userAddress, nowMs)) {
+    if (
+      isRecentAttempt(
+        this.state,
+        subscription.serviceAddress,
+        subscription.userAddress,
+        nowMs,
+        this.options.duplicateWindowMs
+      )
+    ) {
       return { ok: false, reason: "duplicate-window" };
     }
 
@@ -299,7 +370,7 @@ class SubArcRelayerService {
     if (details.expiry > nowSeconds) {
       return { ok: false, reason: "not-due-yet" };
     }
-    if (nowSeconds > details.expiry + RENEWAL_GRACE_PERIOD) {
+    if (nowSeconds > details.expiry + this.options.renewalGracePeriodSeconds) {
       return { ok: false, reason: "grace-window-expired" };
     }
 
@@ -388,9 +459,48 @@ class SubArcRelayerService {
     await this.refreshTrackedSubscriptions();
     return results;
   }
+
+  async getStatusSummary() {
+    const now = await this.getCurrentChainTimestamp();
+    const subscriptions = Object.values(this.state.subscriptions);
+    const activeSubscriptions = subscriptions.filter((subscription) => {
+      return !subscription.canceled && BigInt(subscription.expiresAt || 0) > now;
+    });
+    const dueSubscriptions = subscriptions.filter((subscription) => {
+      if (subscription.canceled) {
+        return false;
+      }
+      const expiry = BigInt(subscription.expiresAt || 0);
+      return (
+        expiry <= now &&
+        now <= expiry + this.options.renewalGracePeriodSeconds
+      );
+    });
+    const canceledSubscriptions = subscriptions.filter((subscription) => subscription.canceled);
+    const recentAttempts = this.state.renewalAttempts.slice(-10).reverse();
+    const recentIssues = recentAttempts.filter((attempt) => {
+      return attempt.status !== "submitted";
+    });
+
+    return {
+      manifestPath: this.manifest.__path,
+      network: this.manifest.network,
+      factoryAddress: this.manifest.factoryAddress,
+      paymentTokenAddress: this.manifest.paymentTokenAddress,
+      lastIndexedBlock: this.state.metadata.lastIndexedBlock,
+      services: Object.keys(this.state.services).length,
+      plans: Object.keys(this.state.plans).length,
+      activeSubscriptions: activeSubscriptions.length,
+      dueSubscriptions: dueSubscriptions.length,
+      canceledSubscriptions: canceledSubscriptions.length,
+      recentRenewalAttempts: recentAttempts,
+      recentIssues,
+    };
+  }
 }
 
 module.exports = {
   SubArcRelayerService,
-  RENEWAL_GRACE_PERIOD,
+  DEFAULT_RENEWAL_GRACE_PERIOD_SECONDS,
+  DEFAULT_DUPLICATE_WINDOW_MS,
 };

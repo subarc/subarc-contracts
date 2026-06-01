@@ -4,9 +4,18 @@
   "network": "arcTestnet",
   "chainId": 5042002,
   "expectedArcChainId": 5042002,
+  "logicAddress": null,
+  "factoryAddress": null,
+  "paymentTokenAddress": "0x3600000000000000000000000000000000000000",
+  "platformWallet": null,
+  "deploymentBlock": null,
   "deployedAt": null,
   "deployer": null,
-  "platformWallet": null,
+  "txHashes": {
+    "logicAddress": null,
+    "factoryAddress": null,
+    "mockUsdc": null
+  },
   "paymentToken": {
     "kind": "arc-usdc",
     "address": "0x3600000000000000000000000000000000000000",
@@ -34,12 +43,12 @@
     "blockNumber": null,
     "gasPriceWei": null
   },
-  "verify": {
+  "verification": {
     "explorer": "https://testnet.arcscan.app",
     "apiUrl": "https://testnet.arcscan.app/api",
     "commands": {
-      "subArcLogicV1": null,
-      "subArcFactoryV1": null,
+      "logicAddress": null,
+      "factoryAddress": null,
       "mockUsdc": null
     }
   }
