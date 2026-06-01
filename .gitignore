@@ -32,3 +32,4 @@ relayer-data/
 contracts.zip
 out/
 broadcast/
+deployments/arcTestnet.latest.json

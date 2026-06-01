@@ -5,9 +5,13 @@
   "scripts": {
     "test": "hardhat test",
     "deploy:arc": "hardhat run scripts/deploy-arc-testnet.js --network arcTestnet",
+    "demo:local": "hardhat run scripts/demo-local.js",
+    "demo:arc:prepare": "hardhat run scripts/demo-arc-prepare.js --network arcTestnet",
+    "demo:arc:check": "hardhat run scripts/demo-arc-check.js --network arcTestnet",
     "relayer:scan": "node scripts/relayer-cli.js scan",
     "relayer:once": "node scripts/relayer-cli.js once",
     "relayer:loop": "node scripts/relayer-cli.js loop",
+    "relayer:status": "node scripts/relayer-cli.js status",
     "verify:arc:logic": "hardhat verify --network arcTestnet",
     "verify:arc:factory": "hardhat verify --network arcTestnet"
   },

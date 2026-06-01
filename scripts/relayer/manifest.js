@@ -6,7 +6,9 @@ function readManifest(manifestPath) {
   const absolutePath = path.resolve(process.cwd(), manifestPath);
 
   if (!fs.existsSync(absolutePath)) {
-    throw new Error(`Deployment manifest not found: ${absolutePath}`);
+    throw new Error(
+      `Deployment manifest not found: ${absolutePath}\nRun "npm run deploy:arc" to generate deployments/arcTestnet.latest.json.`
+    );
   }
 
   const manifest = JSON.parse(fs.readFileSync(absolutePath, "utf8"));
@@ -20,45 +22,123 @@ function assertAddress(address, fieldName) {
   }
 }
 
+function normalizeManifest(manifest) {
+  const logicAddress =
+    manifest.logicAddress ||
+    (manifest.contracts &&
+      manifest.contracts.subArcLogicV1 &&
+      manifest.contracts.subArcLogicV1.address) ||
+    null;
+  const factoryAddress =
+    manifest.factoryAddress ||
+    (manifest.contracts &&
+      manifest.contracts.subArcFactoryV1 &&
+      manifest.contracts.subArcFactoryV1.address) ||
+    null;
+  const paymentTokenAddress =
+    manifest.paymentTokenAddress ||
+    (manifest.paymentToken && manifest.paymentToken.address) ||
+    (manifest.contracts &&
+      manifest.contracts.subArcFactoryV1 &&
+      manifest.contracts.subArcFactoryV1.constructorArgs &&
+      manifest.contracts.subArcFactoryV1.constructorArgs.paymentToken) ||
+    null;
+  const txHashes = {
+    logicAddress:
+      (manifest.txHashes && manifest.txHashes.logicAddress) ||
+      (manifest.contracts &&
+        manifest.contracts.subArcLogicV1 &&
+        manifest.contracts.subArcLogicV1.deployTransactionHash) ||
+      null,
+    factoryAddress:
+      (manifest.txHashes && manifest.txHashes.factoryAddress) ||
+      (manifest.contracts &&
+        manifest.contracts.subArcFactoryV1 &&
+        manifest.contracts.subArcFactoryV1.deployTransactionHash) ||
+      null,
+    mockUsdc:
+      (manifest.txHashes && manifest.txHashes.mockUsdc) ||
+      (manifest.contracts &&
+        manifest.contracts.mockUsdc &&
+        manifest.contracts.mockUsdc.deployTransactionHash) ||
+      null,
+  };
+
+  return {
+    ...manifest,
+    logicAddress,
+    factoryAddress,
+    paymentTokenAddress,
+    deploymentBlock:
+      manifest.deploymentBlock ||
+      (manifest.rpc && manifest.rpc.blockNumber) ||
+      null,
+    txHashes,
+    paymentToken: {
+      kind:
+        (manifest.paymentToken && manifest.paymentToken.kind) ||
+        "arc-usdc",
+      address: paymentTokenAddress,
+      decimals:
+        (manifest.paymentToken && manifest.paymentToken.decimals) || 6,
+      deployedByScript:
+        Boolean(manifest.paymentToken && manifest.paymentToken.deployedByScript),
+    },
+    verification:
+      manifest.verification ||
+      manifest.verify || {
+        commands: {},
+      },
+  };
+}
+
+function isPlaceholderManifest(manifest) {
+  return (
+    !manifest.deployedAt ||
+    !manifest.deployer ||
+    !manifest.logicAddress ||
+    !manifest.factoryAddress ||
+    !manifest.paymentTokenAddress ||
+    !manifest.platformWallet ||
+    !manifest.txHashes.logicAddress ||
+    !manifest.txHashes.factoryAddress
+  );
+}
+
 function validateManifest(manifest) {
   if (!manifest || manifest.project !== "SubArc") {
     throw new Error("Deployment manifest is not a SubArc manifest");
   }
 
-  if (!manifest.deployedAt) {
-    throw new Error("Deployment manifest is still a placeholder: deployedAt is null");
+  const normalized = normalizeManifest(manifest);
+
+  if (isPlaceholderManifest(normalized)) {
+    throw new Error(
+      `Deployment manifest is still a placeholder or incomplete: ${normalized.__path || "unknown path"}\nRun "npm run deploy:arc" to generate a real deployments/arcTestnet.latest.json.`
+    );
   }
 
-  assertAddress(manifest.paymentToken && manifest.paymentToken.address, "paymentToken.address");
-  assertAddress(
-    manifest.contracts &&
-      manifest.contracts.subArcLogicV1 &&
-      manifest.contracts.subArcLogicV1.address,
-    "contracts.subArcLogicV1.address"
-  );
-  assertAddress(
-    manifest.contracts &&
-      manifest.contracts.subArcFactoryV1 &&
-      manifest.contracts.subArcFactoryV1.address,
-    "contracts.subArcFactoryV1.address"
-  );
+  assertAddress(normalized.logicAddress, "logicAddress");
+  assertAddress(normalized.factoryAddress, "factoryAddress");
+  assertAddress(normalized.paymentTokenAddress, "paymentTokenAddress");
+  assertAddress(normalized.platformWallet, "platformWallet");
 
-  if (!manifest.contracts.subArcLogicV1.deployTransactionHash) {
-    throw new Error("Deployment manifest is still a placeholder: logic deploy tx hash is null");
+  if (!normalized.network) {
+    throw new Error("Manifest field network is missing");
+  }
+  if (!normalized.chainId) {
+    throw new Error("Manifest field chainId is missing");
+  }
+  if (!normalized.deploymentBlock) {
+    throw new Error("Manifest field deploymentBlock is missing");
   }
 
-  if (!manifest.contracts.subArcFactoryV1.deployTransactionHash) {
-    throw new Error("Deployment manifest is still a placeholder: factory deploy tx hash is null");
-  }
-
-  if (!manifest.platformWallet) {
-    throw new Error("Deployment manifest is missing platformWallet");
-  }
-
-  return manifest;
+  return normalized;
 }
 
 module.exports = {
   readManifest,
+  normalizeManifest,
   validateManifest,
+  isPlaceholderManifest,
 };

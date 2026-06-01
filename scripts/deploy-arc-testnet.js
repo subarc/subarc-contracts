@@ -20,12 +20,21 @@ async function ensureHasCode(address, label, provider) {
   }
 }
 
+function buildVerificationCommands(networkName, logicAddress, factoryAddress, paymentTokenAddress, platformWallet, mockInfo) {
+  return {
+    logicAddress: `npx hardhat verify --network ${networkName} ${logicAddress}`,
+    factoryAddress: `npx hardhat verify --network ${networkName} ${factoryAddress} "${logicAddress}" "${paymentTokenAddress}" "${platformWallet}"`,
+    mockUsdc: mockInfo
+      ? `npx hardhat verify --network ${networkName} ${mockInfo.address} "${mockInfo.name}" "${mockInfo.symbol}"`
+      : null,
+  };
+}
+
 async function main() {
   const { ethers, network } = hre;
   const [deployer] = await ethers.getSigners();
   const provider = ethers.provider;
   const feeData = await provider.getFeeData();
-  const latestBlock = await provider.getBlock("latest");
   const networkInfo = await provider.getNetwork();
 
   const platformWallet = process.env.PLATFORM_WALLET || deployer.address;
@@ -35,6 +44,7 @@ async function main() {
   let paymentTokenAddress = process.env.ARC_USDC_ADDRESS || DEFAULT_ARC_USDC;
   let paymentTokenKind = "arc-usdc";
   let mockUsdc = null;
+  let mockInfo = null;
 
   if (deployMockUsdc) {
     const mockName = process.env.MOCK_USDC_NAME || "Arc Test USDC";
@@ -44,6 +54,12 @@ async function main() {
     await mockUsdc.waitForDeployment();
     paymentTokenAddress = await mockUsdc.getAddress();
     paymentTokenKind = "mock-usdc";
+    mockInfo = {
+      address: paymentTokenAddress,
+      name: mockName,
+      symbol: mockSymbol,
+      deployTransactionHash: mockUsdc.deploymentTransaction().hash,
+    };
   } else {
     await ensureHasCode(paymentTokenAddress, "Payment token", provider);
   }
@@ -60,15 +76,34 @@ async function main() {
   );
   await factory.waitForDeployment();
 
+  const latestBlock = await provider.getBlock("latest");
+  const verificationCommands = buildVerificationCommands(
+    network.name,
+    await logic.getAddress(),
+    await factory.getAddress(),
+    paymentTokenAddress,
+    platformWallet,
+    mockInfo
+  );
+
   const manifest = {
     project: "SubArc",
     environment: "arc-testnet-mvp",
     network: network.name,
     chainId: Number(networkInfo.chainId),
     expectedArcChainId: Number(ARC_CHAIN_ID),
+    logicAddress: await logic.getAddress(),
+    factoryAddress: await factory.getAddress(),
+    paymentTokenAddress,
+    platformWallet,
+    deploymentBlock: latestBlock ? latestBlock.number : null,
     deployedAt: new Date().toISOString(),
     deployer: deployer.address,
-    platformWallet,
+    txHashes: {
+      logicAddress: logic.deploymentTransaction().hash,
+      factoryAddress: factory.deploymentTransaction().hash,
+      mockUsdc: mockInfo ? mockInfo.deployTransactionHash : null,
+    },
     paymentToken: {
       kind: paymentTokenKind,
       address: paymentTokenAddress,
@@ -89,10 +124,10 @@ async function main() {
           platformWallet,
         },
       },
-      mockUsdc: mockUsdc
+      mockUsdc: mockInfo
         ? {
-            address: paymentTokenAddress,
-            deployTransactionHash: mockUsdc.deploymentTransaction().hash,
+            address: mockInfo.address,
+            deployTransactionHash: mockInfo.deployTransactionHash,
           }
         : null,
     },
@@ -101,16 +136,15 @@ async function main() {
       blockNumber: latestBlock ? latestBlock.number : null,
       gasPriceWei: feeData.gasPrice ? feeData.gasPrice.toString() : null,
     },
+    verification: {
+      explorer: process.env.ARCSCAN_BROWSER_URL || "https://testnet.arcscan.app",
+      apiUrl: process.env.ARCSCAN_API_URL || "https://testnet.arcscan.app/api",
+      commands: verificationCommands,
+    },
     verify: {
       explorer: process.env.ARCSCAN_BROWSER_URL || "https://testnet.arcscan.app",
       apiUrl: process.env.ARCSCAN_API_URL || "https://testnet.arcscan.app/api",
-      commands: {
-        subArcLogicV1: `npx hardhat verify --network ${network.name} ${await logic.getAddress()}`,
-        subArcFactoryV1: `npx hardhat verify --network ${network.name} ${await factory.getAddress()} "${await logic.getAddress()}" "${paymentTokenAddress}" "${platformWallet}"`,
-        mockUsdc: mockUsdc
-          ? `npx hardhat verify --network ${network.name} ${paymentTokenAddress} "${process.env.MOCK_USDC_NAME || "Arc Test USDC"}" "${process.env.MOCK_USDC_SYMBOL || "USDC"}"`
-          : null,
-      },
+      commands: verificationCommands,
     },
   };
 
@@ -123,11 +157,20 @@ async function main() {
   fs.writeFileSync(absoluteOutFile, JSON.stringify(manifest, null, 2));
 
   console.log("SubArc MVP deployment complete");
-  console.log(`Network: ${network.name} (${networkInfo.chainId})`);
-  console.log(`Logic:   ${manifest.contracts.subArcLogicV1.address}`);
-  console.log(`Factory: ${manifest.contracts.subArcFactoryV1.address}`);
-  console.log(`Token:   ${manifest.paymentToken.address} [${manifest.paymentToken.kind}]`);
-  console.log(`Manifest written to ${absoluteOutFile}`);
+  console.log(`Network:        ${network.name} (${networkInfo.chainId})`);
+  console.log(`Logic address:  ${manifest.logicAddress}`);
+  console.log(`Factory:        ${manifest.factoryAddress}`);
+  console.log(`Payment token:  ${manifest.paymentTokenAddress} [${manifest.paymentToken.kind}]`);
+  console.log(`PlatformWallet: ${manifest.platformWallet}`);
+  console.log(`Block:          ${manifest.deploymentBlock}`);
+  console.log(`Manifest:       ${absoluteOutFile}`);
+  console.log("");
+  console.log("Verification commands:");
+  console.log(`- Logic:   ${verificationCommands.logicAddress}`);
+  console.log(`- Factory: ${verificationCommands.factoryAddress}`);
+  if (verificationCommands.mockUsdc) {
+    console.log(`- MockUSDC:${verificationCommands.mockUsdc}`);
+  }
 }
 
 main().catch((error) => {

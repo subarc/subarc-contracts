@@ -48,9 +48,18 @@ describe("SubArc relayer/indexer MVP service", function () {
       network: "hardhat",
       chainId: 31337,
       expectedArcChainId: 5042002,
+      logicAddress: logicImpl.target,
+      factoryAddress: factory.target,
+      paymentTokenAddress: paymentToken.target,
+      deploymentBlock: 1,
       deployedAt: new Date().toISOString(),
       deployer: platformWallet.address,
       platformWallet: platformWallet.address,
+      txHashes: {
+        logicAddress: logicImpl.deploymentTransaction().hash,
+        factoryAddress: factory.deploymentTransaction().hash,
+        mockUsdc: paymentToken.deploymentTransaction().hash,
+      },
       paymentToken: {
         kind: "mock-usdc",
         address: paymentToken.target,
@@ -87,13 +96,13 @@ describe("SubArc relayer/indexer MVP service", function () {
   it("rejects placeholder deployment manifests", async function () {
     const placeholder = JSON.parse(
       fs.readFileSync(
-        path.resolve(__dirname, "..", "deployments", "arcTestnet.latest.json"),
+        path.resolve(__dirname, "..", "deployments", "arcTestnet.example.json"),
         "utf8"
       )
     );
 
     expect(() => validateManifest(placeholder))
-      .to.throw("Deployment manifest is still a placeholder: deployedAt is null");
+      .to.throw("Deployment manifest is still a placeholder or incomplete");
   });
 
   it("indexes events and renews due subscriptions once", async function () {
@@ -174,6 +183,39 @@ describe("SubArc relayer/indexer MVP service", function () {
     expect(results[0].failureReason).to.equal("insufficient-allowance");
   });
 
+  it("builds a status summary from local relayer state", async function () {
+    const { paymentToken, logicImpl, factory, platformWallet, merchant, subscriber, relayer } =
+      await loadFixture(deployFixture);
+
+    const service = await createService(
+      factory.connect(merchant)["createService(address,uint256,uint256)"](
+        await paymentToken.getAddress(),
+        SUB_PRICE,
+        MONTH
+      ),
+      factory
+    );
+
+    await paymentToken.connect(subscriber).approve(await service.getAddress(), SUB_PRICE);
+    await service.connect(subscriber).subscribe(1, SUB_PRICE, MONTH, 1000);
+
+    const manifest = buildManifest({ paymentToken, logicImpl, factory, platformWallet });
+    const relayerService = new SubArcRelayerService({
+      provider: ethers.provider,
+      signer: relayer,
+      manifest,
+      state: defaultState(),
+    });
+
+    await relayerService.scan();
+    const summary = await relayerService.getStatusSummary();
+    expect(summary.network).to.equal("hardhat");
+    expect(summary.factoryAddress).to.equal(factory.target);
+    expect(summary.services).to.equal(1);
+    expect(summary.plans).to.equal(1);
+    expect(summary.activeSubscriptions).to.equal(1);
+  });
+
   it("can read a real manifest path when present", async function () {
     const { paymentToken, logicImpl, factory, platformWallet } = await loadFixture(deployFixture);
     const manifest = buildManifest({ paymentToken, logicImpl, factory, platformWallet });
@@ -184,6 +226,6 @@ describe("SubArc relayer/indexer MVP service", function () {
 
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
     const validated = validateManifest(parsed);
-    expect(validated.contracts.subArcFactoryV1.address).to.equal(factory.target);
+    expect(validated.factoryAddress).to.equal(factory.target);
   });
 });

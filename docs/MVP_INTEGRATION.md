@@ -35,6 +35,14 @@ It writes a machine-readable manifest to:
 deployments/arcTestnet.latest.json
 ```
 
+Checked-in template:
+
+```bash
+deployments/arcTestnet.example.json
+```
+
+The relayer and Arc demo scripts expect a real generated `arcTestnet.latest.json`, not the checked-in example.
+
 By default the script assumes Arc-native USDC at:
 
 ```text
