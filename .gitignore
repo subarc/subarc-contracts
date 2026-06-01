@@ -6,6 +6,8 @@ installed_contracts/
 cache/
 artifacts/
 ignition/deployments/chain-31337
+ignition/deployments/chain-5042002
+ignition/deployments/
 
 # Environment variables (ÇOK ÖNEMLİ - GİZLİLİK)
 .env
@@ -26,3 +28,5 @@ yarn-debug.log*
 yarn-error.log*
 dist/
 bundle/
+relayer-data/
+contracts.zip
